@@ -108,9 +108,11 @@
 (defn remove-caption [p caption-id]
   (update p :project/captions #(vec (remove (fn [caption] (= caption-id (:caption/id caption))) %))))
 (defn set-caption-reviewer [p caption-id reviewer]
-  (if (and (string? reviewer) (not (str/blank? reviewer)))
-    (update p :project/captions #(mapv (fn [caption] (if (= caption-id (:caption/id caption))
-                                                       (assoc caption :caption/reviewer reviewer) caption)) %))
+  (if (string? reviewer)
+    (update p :project/captions #(mapv (fn [caption]
+                                        (if (= caption-id (:caption/id caption))
+                                          (if (str/blank? reviewer) (dissoc caption :caption/reviewer)
+                                              (assoc caption :caption/reviewer reviewer)) caption)) %))
     p))
 (defn set-caption-status
   ([p caption-id status] (set-caption-status p caption-id status "system" 0))
@@ -142,6 +144,58 @@
                                {:review/id note-id :review/author author :review/text text :review/at created-at})
                        caption)) %))
     p))
+(defn start-caption-review-thread [p caption-id thread-id author text created-at]
+  (if (and (string? thread-id) (not (str/blank? thread-id))
+           (string? author) (not (str/blank? author))
+           (string? text) (not (str/blank? text))
+           (number? created-at) (not (neg? created-at)))
+    (update p :project/captions
+            #(mapv (fn [caption]
+                     (if (and (= caption-id (:caption/id caption))
+                              (not (some (fn [note] (= thread-id (:review/id note))) (:caption/review-notes caption))))
+                       (update caption :caption/review-notes (fnil conj [])
+                               {:review/id thread-id :review/thread-id thread-id :review/parent-id nil
+                                :review/author author :review/text text :review/at created-at
+                                :review/resolved? false :review/resolution-history []})
+                       caption)) %))
+    p))
+(defn reply-caption-review-thread [p caption-id thread-id reply-id author text created-at]
+  (if (and (string? reply-id) (not (str/blank? reply-id))
+           (string? author) (not (str/blank? author))
+           (string? text) (not (str/blank? text))
+           (number? created-at) (not (neg? created-at)))
+    (update p :project/captions
+            #(mapv (fn [caption]
+                     (let [notes (:caption/review-notes caption)
+                           root (some (fn [note] (when (and (= thread-id (:review/thread-id note))
+                                                            (nil? (:review/parent-id note))) note)) notes)]
+                       (if (and (= caption-id (:caption/id caption)) root
+                                (not (:review/resolved? root))
+                                (not (some (fn [note] (= reply-id (:review/id note))) notes)))
+                         (update caption :caption/review-notes (fnil conj [])
+                                 {:review/id reply-id :review/thread-id thread-id :review/parent-id thread-id
+                                  :review/author author :review/text text :review/at created-at})
+                         caption))) %))
+    p))
+(defn set-caption-review-thread-resolution [p caption-id thread-id resolved? actor changed-at]
+  (if (and (boolean? resolved?) (string? actor) (not (str/blank? actor))
+           (number? changed-at) (not (neg? changed-at)))
+    (update p :project/captions
+            #(mapv (fn [caption]
+                     (if (= caption-id (:caption/id caption))
+                       (update caption :caption/review-notes
+                               (fn [notes]
+                                 (mapv (fn [note]
+                                         (if (and (= thread-id (:review/thread-id note))
+                                                  (nil? (:review/parent-id note))
+                                                  (not= resolved? (:review/resolved? note)))
+                                           (-> note (assoc :review/resolved? resolved?)
+                                               (update :review/resolution-history (fnil conj [])
+                                                       {:resolution/resolved? resolved? :resolution/actor actor
+                                                        :resolution/at changed-at}))
+                                           note)) notes)))
+                       caption)) %))
+    p))
 (defn clone-caption-language [p source-language target-language]
   (let [source (normalize-language source-language) target (normalize-language target-language)
         source-captions (filter #(= source (caption-language %)) (:project/captions p))]
@@ -152,7 +206,8 @@
                                   (-> caption
                                       (assoc :caption/id (str "translation:" target ":" index)
                                              :caption/language target :caption/status :draft
-                                             :caption/review-notes [] :caption/status-history []))) source-captions)]
+                                             :caption/review-notes [] :caption/status-history [])
+                                      (dissoc :caption/reviewer))) source-captions)]
         (assoc p :project/captions (->> (concat retained cloned)
                                         (sort-by (juxt :caption/start-frame :caption/id)) vec)
                  :project/caption-language target))
@@ -438,7 +493,28 @@
                           (or (not (string? (:review/id note))) (str/blank? (:review/id note))
                               (not (string? (:review/author note))) (str/blank? (:review/author note))
                               (not (string? (:review/text note))) (str/blank? (:review/text note))
-                              (not (number? (:review/at note))) (neg? (or (:review/at note) -1))))
+                              (not (number? (:review/at note))) (neg? (or (:review/at note) -1))
+                              (and (:review/thread-id note)
+                                   (or (not (string? (:review/thread-id note)))
+                                       (not (some #(= (:review/thread-id note) (:review/id %))
+                                                  (:caption/review-notes caption)))))
+                              (and (:review/parent-id note)
+                                   (not (some #(and (= (:review/parent-id note) (:review/id %))
+                                                    (nil? (:review/parent-id %)))
+                                              (:caption/review-notes caption))))
+                              (and (contains? note :review/resolved?)
+                                   (not (boolean? (:review/resolved? note))))
+                              (some (fn [entry]
+                                      (or (not (boolean? (:resolution/resolved? entry)))
+                                          (not (string? (:resolution/actor entry)))
+                                          (str/blank? (:resolution/actor entry))
+                                          (not (number? (:resolution/at entry)))
+                                          (neg? (or (:resolution/at entry) -1))))
+                                    (:review/resolution-history note))
+                              (and (seq (:review/resolution-history note))
+                                   (or (not (apply <= (map :resolution/at (:review/resolution-history note))))
+                                       (not= (:review/resolved? note)
+                                             (:resolution/resolved? (last (:review/resolution-history note))))))))
                         (:caption/review-notes caption))
                   (and (seq (:caption/review-notes caption))
                        (not (apply <= (map :review/at (:caption/review-notes caption)))))

@@ -182,7 +182,8 @@
 (deftest caption-language-clone-and-delete-workflow
   (let [english (-> p
                     (nle/add-caption "en-a" 0 30 "First" "en" nle/default-caption-style)
-                    (nle/add-caption "en-b" 30 60 "Second" "en" nle/default-caption-style))
+                    (nle/add-caption "en-b" 30 60 "Second" "en" nle/default-caption-style)
+                    (nle/set-caption-reviewer "en-a" "source-reviewer"))
         japanese (nle/clone-caption-language english "en" "ja")
         deleted (nle/remove-caption japanese "translation:ja:0")]
     (is (= "ja" (:project/caption-language japanese)))
@@ -191,6 +192,8 @@
                                                             (:project/captions japanese)))))
     (is (= [:draft :draft] (mapv nle/caption-status (filter #(= "ja" (nle/caption-language %))
                                                              (:project/captions japanese)))))
+    (is (every? nil? (map :caption/reviewer (filter #(= "ja" (nle/caption-language %))
+                                                     (:project/captions japanese)))))
     (is (= ["translation:ja:1"] (mapv :caption/id (filter #(= "ja" (nle/caption-language %))
                                                             (:project/captions deleted)))))
     (is (= japanese (nle/clone-caption-language japanese "ja" "ja")))
@@ -236,7 +239,25 @@
     (is (= :draft (nle/caption-status (first (:project/captions rejected)))))
     (is (= :approved (nle/caption-status (first (:project/captions approved)))))
     (is (= "mika" (get-in approved [:project/captions 0 :caption/reviewer])))
+    (is (nil? (get-in (nle/set-caption-reviewer approved "cue" "")
+                      [:project/captions 0 :caption/reviewer])))
     (is (empty? (nle/validate-project approved)))))
+(deftest caption-review-threads-reply-resolve-and-reopen-with-audit
+  (let [base (-> (nle/add-caption p "cue" 0 60 "Review" "en" nle/default-caption-style)
+                 (nle/start-caption-review-thread "cue" "thread-1" "mika" "Fix timing" 1000))
+        replied (nle/reply-caption-review-thread base "cue" "thread-1" "reply-1" "ken" "Fixed" 1100)
+        resolved (nle/set-caption-review-thread-resolution replied "cue" "thread-1" true "mika" 1200)
+        blocked-reply (nle/reply-caption-review-thread resolved "cue" "thread-1" "reply-2" "ken" "Late" 1250)
+        reopened (nle/set-caption-review-thread-resolution resolved "cue" "thread-1" false "lead" 1300)
+        root (first (get-in reopened [:project/captions 0 :caption/review-notes]))]
+    (is (= ["thread-1" "reply-1"]
+           (mapv :review/id (get-in replied [:project/captions 0 :caption/review-notes]))))
+    (is (= resolved blocked-reply))
+    (is (false? (:review/resolved? root)))
+    (is (= [{:resolution/resolved? true :resolution/actor "mika" :resolution/at 1200}
+            {:resolution/resolved? false :resolution/actor "lead" :resolution/at 1300}]
+           (:review/resolution-history root)))
+    (is (empty? (nle/validate-project reopened)))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))

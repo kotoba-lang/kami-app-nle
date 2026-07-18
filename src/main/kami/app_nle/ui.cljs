@@ -878,12 +878,38 @@
        [:button {:aria-label (str "Add review note to " (:caption/id caption))
                  :disabled (str/blank? (get-in @state [:caption-review-drafts (:caption/id caption)] ""))
                  :on-click #(let [now (js/Date.now)]
-                              (swap! state update :project nle/add-caption-review-note (:caption/id caption)
+                              (swap! state update :project nle/start-caption-review-thread (:caption/id caption)
                                      (str "review:" now) (:review-author @state)
                                      (get-in @state [:caption-review-drafts (:caption/id caption)]) now)
                               (swap! state assoc-in [:caption-review-drafts (:caption/id caption)] ""))} "Add review note"]
        (for [note (:caption/review-notes caption)]
-         ^{:key (:review/id note)} [:small (str (:review/author note) ": " (:review/text note))])
+         ^{:key (:review/id note)}
+         [:div
+          [:small (str (when (:review/parent-id note) "↳ ") (:review/author note) ": " (:review/text note)
+                       (when (contains? note :review/resolved?)
+                         (if (:review/resolved? note) " [resolved]" " [open]")))]
+          (when (and (:review/thread-id note) (nil? (:review/parent-id note)))
+            [:span
+             [:button {:aria-label (str (if (:review/resolved? note) "Reopen " "Resolve ") (:review/id note))
+                       :on-click #(swap! state update :project nle/set-caption-review-thread-resolution
+                                         (:caption/id caption) (:review/thread-id note)
+                                         (not (:review/resolved? note)) (:review-author @state) (js/Date.now))}
+              (if (:review/resolved? note) "Reopen" "Resolve")]
+             [:input {:value (get-in @state [:caption-reply-drafts (:review/id note)] "")
+                      :disabled (:review/resolved? note)
+                      :placeholder "Reply" :aria-label (str (:review/id note) " reply")
+                      :on-change #(swap! state assoc-in [:caption-reply-drafts (:review/id note)]
+                                         (.. % -target -value))}]
+             [:button {:aria-label (str "Reply to " (:review/id note))
+                       :disabled (or (:review/resolved? note)
+                                     (str/blank? (get-in @state [:caption-reply-drafts (:review/id note)] "")))
+                       :on-click #(let [now (js/Date.now)]
+                                    (swap! state update :project nle/reply-caption-review-thread
+                                           (:caption/id caption) (:review/thread-id note) (str "reply:" now)
+                                           (:review-author @state)
+                                           (get-in @state [:caption-reply-drafts (:review/id note)]) now)
+                                    (swap! state assoc-in [:caption-reply-drafts (:review/id note)] ""))}
+              "Reply"]])])
        (when-let [entry (last (:caption/status-history caption))]
          [:small (str "Status " (name (:status/from entry)) " → " (name (:status/to entry))
                       " by " (:status/actor entry))])
