@@ -334,6 +334,13 @@
           (some #(imsc-node-style-value document % local-name visited)
                 (imsc-referenced-styles document node))
           (imsc-node-style-value document (.-parentElement node) local-name visited)))))
+(defn imsc-specified-style-value [document node local-name visited]
+  (when (and node (not (contains? visited node)))
+    (let [visited (conj visited node)
+          inline (.getAttributeNS node ttml-styling-namespace local-name)]
+      (or (when (seq inline) inline)
+          (some #(imsc-specified-style-value document % local-name visited)
+                (imsc-referenced-styles document node))))))
 (defn imsc-region-id [node]
   (when node
     (let [region-id (.getAttribute node "region")]
@@ -349,6 +356,60 @@
         y-token (second (str/split (or origin "") #"\s+"))
         y (when (and y-token (str/ends-with? y-token "%")) (js/parseFloat y-token))]
     (if (or (= region-id "top") (and (number? y) (< y 50))) :top :bottom)))
+(defn imsc-origin-position [origin fallback]
+  (let [y-token (second (str/split (or origin "") #"\s+"))
+        y (when (and y-token (str/ends-with? y-token "%")) (js/parseFloat y-token))]
+    (if (number? y) (if (< y 50) :top :bottom) fallback)))
+(defn imsc-font-scale [font-size]
+  (if (and font-size (str/ends-with? font-size "%"))
+    (/ (js/parseFloat font-size) 100) 1.0))
+(defn imsc-set-segments [document node fps start end]
+  (let [sets (map-indexed
+              (fn [index set-node]
+                (let [begin-text (.getAttribute set-node "begin")
+                      end-text (.getAttribute set-node "end")
+                      duration-text (.getAttribute set-node "dur")
+                      parse-time #(when (seq %) (nle/imsc-time->frame % fps))
+                      parsed-begin (parse-time begin-text)
+                      explicit-end (parse-time end-text)
+                      duration (parse-time duration-text)
+                      valid? (every? true? [(or (not (seq begin-text)) (number? parsed-begin))
+                                            (or (not (seq end-text)) (number? explicit-end))
+                                            (or (not (seq duration-text)) (number? duration))])
+                      offset (or parsed-begin 0)
+                      set-start (min end (max start (+ start offset)))
+                      raw-end (cond explicit-end (+ start explicit-end)
+                                    duration (+ set-start duration)
+                                    :else end)
+                      set-end (min end (max set-start raw-end))]
+                  {:set/index index :set/start set-start :set/end set-end :set/node set-node :set/valid? valid?}))
+              (array-seq (.getElementsByTagNameNS node ttml-namespace "set")))
+        boundaries (->> (concat [start end] (mapcat (juxt :set/start :set/end) sets)) distinct sort vec)]
+    (when (every? :set/valid? sets)
+      (mapv (fn [[segment-start segment-end]]
+              {:segment/start segment-start :segment/end segment-end
+               :segment/sets (filterv #(and (<= (:set/start %) segment-start)
+                                            (< segment-start (:set/end %))) sets)})
+            (partition 2 1 boundaries)))))
+(defn imsc-segment-style [document node active-sets]
+  (let [base {:caption/position (imsc-caption-position document node)
+              :caption/align (keyword (let [align (imsc-style-value document node "textAlign")]
+                                        (if (#{"left" "center" "right"} align) align "center")))
+              :caption/font-scale (imsc-font-scale (imsc-style-value document node "fontSize"))}
+        overrides (reduce
+                   (fn [style {:keys [set/node]}]
+                     (let [align (imsc-specified-style-value document node "textAlign" #{})
+                           font-size (imsc-specified-style-value document node "fontSize" #{})
+                           origin (imsc-specified-style-value document node "origin" #{})]
+                       (cond-> style
+                         (#{"left" "center" "right"} align) (assoc :caption/align (keyword align))
+                         (seq font-size) (assoc :caption/font-scale (imsc-font-scale font-size))
+                         (seq origin) (assoc :caption/position (imsc-origin-position origin (:caption/position style))))))
+                   base active-sets)
+        visible? (not= "hidden" (some (fn [{:keys [set/node]}]
+                                         (imsc-specified-style-value document node "visibility" #{}))
+                                       (reverse active-sets)))]
+    (when visible? overrides)))
 (defn imsc-node-text [node]
   (apply str
          (map (fn [child]
@@ -368,17 +429,23 @@
                  (= "tt" (.-localName root)) (= ttml-namespace (.-namespaceURI root))
                  (str/includes? (or profile "") "http://www.w3.org/ns/ttml/profile/imsc1.2/text")
                  (seq nodes))
-        (let [cues (mapv (fn [node]
-                           (let [start (nle/imsc-time->frame (.getAttribute node "begin") fps)
-                                 end (nle/imsc-time->frame (.getAttribute node "end") fps)
-                                 align (imsc-style-value document node "textAlign")
-                                 font-size (imsc-style-value document node "fontSize")]
-                             {:caption/start-frame start :caption/end-frame end
-                              :caption/text (str/trim (imsc-node-text node))
-                              :caption/style {:caption/position (imsc-caption-position document node)
-                                              :caption/align (keyword (if (#{"left" "center" "right"} align) align "center"))
-                                              :caption/font-scale (if (and font-size (str/ends-with? font-size "%"))
-                                                                    (/ (js/parseFloat font-size) 100) 1.0)}})) nodes)]
+        (let [cues (mapv identity
+                         (mapcat (fn [node]
+                                   (let [start (nle/imsc-time->frame (.getAttribute node "begin") fps)
+                                         end (nle/imsc-time->frame (.getAttribute node "end") fps)
+                                         text (str/trim (imsc-node-text node))]
+                                     (if (and (number? start) (number? end) (< start end))
+                                       (if-let [segments (imsc-set-segments document node fps start end)]
+                                         (keep (fn [{:keys [segment/start segment/end segment/sets]}]
+                                                 (when-let [style (imsc-segment-style document node sets)]
+                                                   {:caption/start-frame start :caption/end-frame end
+                                                    :caption/text text :caption/style style}))
+                                               segments)
+                                         [{:caption/start-frame nil :caption/end-frame nil
+                                           :caption/text text :caption/style nil}])
+                                       [{:caption/start-frame start :caption/end-frame end
+                                         :caption/text text :caption/style (imsc-segment-style document node [])}])))
+                                 nodes))]
           {:language language :cues cues})))))
 (defn import-imsc1! [event]
   (when-let [file (aget (.. event -target -files) 0)]
