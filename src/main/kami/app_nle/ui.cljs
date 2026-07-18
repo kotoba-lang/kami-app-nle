@@ -5,10 +5,11 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :frame 105 :playing? false :selected "wide" :assets {} :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :frame 105 :playing? false :selected "wide" :assets {} :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
+(defonce shortcuts-installed? (atom false))
 (def recovery-key "kami-app-nle/recovery/v1")
 (defn sha256-file! [file]
   (-> (.arrayBuffer file)
@@ -99,6 +100,26 @@
                (when (not= (:project old) (:project new))
                  (try (.setItem js/localStorage recovery-key (pr-str (nle/recovery-envelope (:project new))))
                       (catch :default error (js/console.warn "NLE autosave failed" error)))))))
+(defn install-history! []
+  (add-watch state ::history
+             (fn [_ _ old new]
+               (when (and (not= (:project old) (:project new)) (not (:history-replaying? new)))
+                 (swap! state update :history nle/record-history (:project old))))))
+(defn undo! []
+  (let [{:keys [project history]} (nle/undo-project (:project @state) (:history @state))]
+    (swap! state assoc :project project :history history :history-replaying? true)
+    (swap! state assoc :history-replaying? false)))
+(defn redo! []
+  (let [{:keys [project history]} (nle/redo-project (:project @state) (:history @state))]
+    (swap! state assoc :project project :history history :history-replaying? true)
+    (swap! state assoc :history-replaying? false)))
+(defn install-shortcuts! []
+  (when-not @shortcuts-installed?
+    (.addEventListener js/window "keydown"
+      (fn [event]
+        (when (and (or (.-metaKey event) (.-ctrlKey event)) (= "z" (.toLowerCase (.-key event))))
+          (.preventDefault event) (if (.-shiftKey event) (redo!) (undo!)))))
+    (reset! shortcuts-installed? true)))
 (defn recorder-options [project]
   (let [profile (nle/export-profile project) preferred (:profile/mime profile)
         fallback "video/webm;codecs=vp8,opus" mime (if (.isTypeSupported js/MediaRecorder preferred) preferred fallback)]
@@ -233,6 +254,8 @@
     [:button {:on-click export-webm! :disabled (or (not decoded?) exporting?)} (if exporting? "Encoding WebM…" "Export WebM")]
     [:button {:on-click download-project!} "Save project EDN"]
     [:label "Open project EDN" [:input {:type "file" :accept ".edn,application/edn" :aria-label "Open NLE project EDN" :on-change load-project!}]]
+    [:button {:on-click undo! :disabled (empty? (get-in @state [:history :history/past])) :aria-label "Undo project edit"} "↶ Undo"]
+    [:button {:on-click redo! :disabled (empty? (get-in @state [:history :history/future])) :aria-label "Redo project edit"} "↷ Redo"]
     [:button {:on-click #(js/navigator.clipboard.writeText (pr-str project))} "Copy project EDN"]]
    (when-let [error (:project-error @state)] [:aside [:strong (str "Project error: " error)]])
    (when (:recovered? @state) [:aside [:strong "Recovered autosaved project"]])
@@ -243,4 +266,4 @@
   [:section.timeline [:input.scrub {:type "range" :min 0 :max total :value frame :aria-label "Playhead" :on-change #(let [f (js/parseInt (.. % -target -value))] (swap! state assoc :frame f) (seek-frame! f))}] (for [track (:project/tracks project)] ^{:key (:track/id track)} [:div.track [:div.track-name (:track/name track)] [:div.lane (for [c (:track/clips track)] ^{:key (:clip/id c)} [clip-view c total])]])]
   [:footer (if-let [e (seq (nle/validate-project project))] (str "Errors: " e) "HTMLVideo decode • canvas effects • MediaRecorder WebM export")]]))
 (defonce root-node (atom nil))
-(defn init! [] (when-not @root-node (restore-recovery!) (install-autosave!) (reset! root-node (rdom/create-root (.getElementById js/document "app")))) (rdom/render @root-node [app]))
+(defn init! [] (when-not @root-node (restore-recovery!) (install-history!) (install-autosave!) (install-shortcuts!) (reset! root-node (rdom/create-root (.getElementById js/document "app")))) (rdom/render @root-node [app]))

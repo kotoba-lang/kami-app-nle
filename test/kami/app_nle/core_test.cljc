@@ -60,3 +60,10 @@
     (is (empty? (nle/missing-asset-ids registered ["asset:7"])))
     (is (= registered (nle/recover-project (nle/recovery-envelope registered))))
     (is (= "asset:0" (nle/next-asset-id registered)))))
+(deftest bounded-project-undo-redo
+  (let [p2 (assoc p :project/export-profile :master) history (nle/record-history nle/empty-history p)
+        undone (nle/undo-project p2 history) redone (nle/redo-project (:project undone) (:history undone))]
+    (is (= p (:project undone)))
+    (is (= p2 (:project redone)))
+    (is (= 50 (count (:history/past (reduce (fn [h n] (nle/record-history h (assoc p :n n)))
+                                             nle/empty-history (range 70))))))))
