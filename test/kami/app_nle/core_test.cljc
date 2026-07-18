@@ -91,7 +91,11 @@
   (is (= ["video/webm;codecs=vp8,opus" 2000000]
          ((juxt :profile/mime :profile/video-bps) (nle/export-profile p))))
   (is (= "video/webm;codecs=vp9,opus"
-         (:profile/mime (nle/export-profile (assoc p :project/export-profile :master))))))
+         (:profile/mime (nle/export-profile (assoc p :project/export-profile :master)))))
+  (let [mp4 (nle/export-profile (assoc p :project/export-profile :mp4-master))]
+    (is (= [:mp4 "mp4" "kami-nle-master.mp4"]
+           [(:profile/container mp4) (:profile/extension mp4) (nle/export-filename mp4)]))
+    (is (= 3 (count (:profile/mimes mp4))))))
 (deftest project-authoritative-delivery-loudness
   (let [configured (-> p
                        (nle/set-delivery-audio :delivery/target-lufs -40)

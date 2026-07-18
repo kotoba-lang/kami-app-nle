@@ -18,9 +18,20 @@
                                      :history/future (pop (:history/future history))}}
     {:project current :history history}))
 (def export-profiles
-  {:review {:profile/name "Review VP8" :profile/mime "video/webm;codecs=vp8,opus" :profile/video-bps 2000000 :profile/audio-bps 128000}
-   :master {:profile/name "Master VP9" :profile/mime "video/webm;codecs=vp9,opus" :profile/video-bps 8000000 :profile/audio-bps 192000}
-   :compact {:profile/name "Compact VP8" :profile/mime "video/webm;codecs=vp8,opus" :profile/video-bps 1000000 :profile/audio-bps 96000}})
+  {:review {:profile/name "Review VP8 WebM" :profile/container :webm :profile/extension "webm"
+            :profile/mime "video/webm;codecs=vp8,opus" :profile/mimes ["video/webm;codecs=vp8,opus"]
+            :profile/video-bps 2000000 :profile/audio-bps 128000}
+   :master {:profile/name "Master VP9 WebM" :profile/container :webm :profile/extension "webm"
+            :profile/mime "video/webm;codecs=vp9,opus" :profile/mimes ["video/webm;codecs=vp9,opus"]
+            :profile/video-bps 8000000 :profile/audio-bps 192000}
+   :compact {:profile/name "Compact VP8 WebM" :profile/container :webm :profile/extension "webm"
+             :profile/mime "video/webm;codecs=vp8,opus" :profile/mimes ["video/webm;codecs=vp8,opus"]
+             :profile/video-bps 1000000 :profile/audio-bps 96000}
+   :mp4-master {:profile/name "Master H.264 MP4" :profile/container :mp4 :profile/extension "mp4"
+                :profile/mime "video/mp4;codecs=avc1.42E01E,mp4a.40.2"
+                :profile/mimes ["video/mp4;codecs=avc1.42E01E,mp4a.40.2" "video/mp4;codecs=avc1,mp4a.40.2" "video/mp4"]
+                :profile/video-bps 8000000 :profile/audio-bps 192000}})
+(defn export-filename [profile] (str "kami-nle-master." (:profile/extension profile)))
 (def proxy-profile {:profile/name "Preview proxy" :profile/mime "video/webm;codecs=vp8,opus"
                     :profile/max-width 640 :profile/max-height 360
                     :profile/video-bps 800000 :profile/audio-bps 96000})

@@ -255,7 +255,7 @@
       (do (.pause (primary-video)) (stop-lane-audio!))
       (do (schedule-audio-lanes! (/ (:frame @state) (get-in @state [:project :project/fps]))) (.play (primary-video))))
     (swap! state update :playing? not)))
-(defn download-blob! [blob] (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")] (set! (.-href a) url) (set! (.-download a) "kami-nle-master.webm") (.click a) (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
+(defn download-blob! [blob filename] (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")] (set! (.-href a) url) (set! (.-download a) filename) (.click a) (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
 (defn download-project! []
   (let [blob (js/Blob. #js [(pr-str (:project @state))] #js {:type "application/edn"})
         url (js/URL.createObjectURL blob) a (.createElement js/document "a")]
@@ -401,10 +401,16 @@
         (when (and (or (.-metaKey event) (.-ctrlKey event)) (= "z" (.toLowerCase (.-key event))))
           (.preventDefault event) (if (.-shiftKey event) (redo!) (undo!)))))
     (reset! shortcuts-installed? true)))
-(defn recorder-options [project]
-  (let [profile (nle/export-profile project) preferred (:profile/mime profile)
-        fallback "video/webm;codecs=vp8,opus" mime (if (.isTypeSupported js/MediaRecorder preferred) preferred fallback)]
-    #js {:mimeType mime :videoBitsPerSecond (:profile/video-bps profile) :audioBitsPerSecond (:profile/audio-bps profile)}))
+(defn supported-profile-mime [profile]
+  (first (filter #(.isTypeSupported js/MediaRecorder %) (:profile/mimes profile))))
+(defn profile-supported? [profile] (boolean (supported-profile-mime profile)))
+(defn resolved-recorder-profile [project]
+  (let [profile (nle/export-profile project)]
+    (when-let [mime (supported-profile-mime profile)]
+      (assoc profile :profile/actual-mime mime :profile/filename (nle/export-filename profile)))))
+(defn recorder-options [profile]
+  #js {:mimeType (:profile/actual-mime profile) :videoBitsPerSecond (:profile/video-bps profile)
+       :audioBitsPerSecond (:profile/audio-bps profile)})
 (defn configure-eq-nodes! [low mid high]
   (set! (.-type low) "lowshelf") (set! (.. low -frequency -value) 120)
   (set! (.-type mid) "peaking") (set! (.. mid -frequency -value) 1000) (set! (.. mid -Q -value) 0.8)
@@ -621,29 +627,39 @@
                    (swap! state assoc :delivery-report report) report)))
         (.finally (fn [] (when @timer (js/clearInterval @timer)) (stop-lane-audio!)
                     (swap! state assoc :analyzing-delivery? false :playing? false))))))
-(defn record-webm! [gain-db]
-  (let [segments (nle/render-segments (:project @state)) audio-segments (nle/audio-segments (:project @state))]
+(defn record-production! [gain-db]
+  (let [project (:project @state) profile (resolved-recorder-profile project)
+        segments (nle/render-segments project) audio-segments (nle/audio-segments project)]
+    (when-not profile
+      (swap! state assoc :project-error (str "Selected export profile is unsupported: "
+                                             (:profile/name (nle/export-profile project)))))
     (when (and (seq segments) (every? #(get-in @state [:assets (:segment/source-id %) :url]) segments)
-               (every? #(get-in @state [:audio-buffers (:segment/source-id %)]) audio-segments))
+               profile (every? #(get-in @state [:audio-buffers (:segment/source-id %)]) audio-segments))
       (let [stream (.captureStream @canvas-node (get-in @state [:project :project/fps]))
             {:keys [context destination]} (ensure-export-audio!)
             base-gain (or (get-in @state [:project :project/master-gain]) 0.9)
             delivery-gain (* base-gain (js/Math.pow 10 (/ gain-db 20)))
             audio-track (first (array-seq (.getAudioTracks (.-stream destination))))
             _ (.addTrack stream audio-track)
-            recorder (js/MediaRecorder. stream (recorder-options (:project @state))) chunks (array)]
+            recorder (js/MediaRecorder. stream (recorder-options profile)) chunks (array)]
         (.resume context) (sync-master-eq!) (set! (.. (:master @export-audio) -gain -value) delivery-gain)
         (set-primary-audio! (first segments)) (swap! state assoc :exporting? true :playing? true)
         (set! (.-ondataavailable recorder) #(when (pos? (.. % -data -size)) (.push chunks (.-data %))))
-        (set! (.-onstop recorder) #(do (stop-lane-audio!) (download-blob! (js/Blob. chunks #js {:type "video/webm"})) (swap! state dissoc :export-segment) (swap! state assoc :exporting? false :playing? false)))
+        (set! (.-onstop recorder) #(do (stop-lane-audio!)
+                                      (download-blob! (js/Blob. chunks #js {:type (:profile/actual-mime profile)})
+                                                      (:profile/filename profile))
+                                      (swap! state dissoc :export-segment)
+                                      (swap! state assoc :exporting? false :playing? false)))
         (.start recorder 250)
         (-> (play-segments! segments) (.then #(.stop recorder))
             (.catch (fn [error] (js/console.error error) (.stop recorder))))))))
-(defn export-webm! []
-  (if (:delivery/normalize? (nle/delivery-audio (:project @state)))
-    (-> (analyze-delivery!) (.then (fn [report] (record-webm! (:normalization/gain-db report))))
-        (.catch #(swap! state assoc :project-error (str "Delivery analysis failed: " (.-message %)))))
-    (record-webm! 0)))
+(defn export-production! []
+  (if-not (resolved-recorder-profile (:project @state))
+    (swap! state assoc :project-error "Selected export profile is unsupported in this browser")
+    (if (:delivery/normalize? (nle/delivery-audio (:project @state)))
+      (-> (analyze-delivery!) (.then (fn [report] (record-production! (:normalization/gain-db report))))
+          (.catch #(swap! state assoc :project-error (str "Delivery analysis failed: " (.-message %)))))
+      (record-production! 0))))
 (declare move-trim! finish-trim! cancel-trim!)
 (defn remove-trim-listeners! []
   (.removeEventListener js/window "pointermove" move-trim!)
@@ -801,7 +817,9 @@
                                            :on-change #(set-master-eq! band (js/parseFloat (.. % -target -value)))}]])
     [:label "Export preset" [:select {:value (name (:project/export-profile project)) :aria-label "Export preset"
                                        :on-change #(swap! state assoc-in [:project :project/export-profile] (keyword (.. % -target -value)))}
-                              (for [[id profile] nle/export-profiles] ^{:key id} [:option {:value (name id)} (:profile/name profile)])]]
+                              (for [[id profile] nle/export-profiles]
+                                ^{:key id} [:option {:value (name id) :disabled (not (profile-supported? profile))}
+                                            (str (:profile/name profile) (when-not (profile-supported? profile) " • unsupported"))])]]
     [:label "Normalize delivery" [:input {:type "checkbox"
                                             :checked (:delivery/normalize? delivery)
                                             :aria-label "Normalize delivery audio"
@@ -824,8 +842,10 @@
        (str (.toFixed (:loudness/lufs report) 1) " LUFS • "
             (.toFixed (:sample-peak/dbfs report) 1) " dBFS • gain "
             (.toFixed (:normalization/gain-db report) 1) " dB")])
-    [:button {:on-click export-webm! :disabled (or (not decoded?) exporting? (:analyzing-delivery? @state))}
-     (cond exporting? "Encoding WebM…" (:analyzing-delivery? @state) "Preflighting audio…" :else "Export WebM")]
+    [:button {:on-click export-production! :disabled (or (not decoded?) exporting? (:analyzing-delivery? @state)
+                                                         (nil? (resolved-recorder-profile project)))}
+     (cond exporting? "Encoding production…" (:analyzing-delivery? @state) "Preflighting audio…"
+           :else (str "Export " (some-> (resolved-recorder-profile project) :profile/container name .toUpperCase)))]
     [:button {:on-click download-project!} "Save project EDN"]
     [:label "Open project EDN" [:input {:type "file" :accept ".edn,application/edn" :aria-label "Open NLE project EDN" :on-change load-project!}]]
     [:button {:on-click export-package!} "Package project + media"]
@@ -851,7 +871,7 @@
      [:canvas {:ref set-canvas-node! :aria-label "Decoded video preview"}]
      (when-not decoded? [:div.scene "IMPORT VIDEO"])] [:div.tools [:button {:disabled (nil? selected) :on-click #(swap! state update :project nle/split-clip selected frame (str selected "-b"))} "Split at playhead"] [:span (str fps " fps • " total " frames • " (name effect) " • " (name (:color/output-space color)))]]]]
   [:section.timeline [:input.scrub {:type "range" :min 0 :max total :value frame :aria-label "Playhead" :on-change #(let [f (js/parseInt (.. % -target -value))] (swap! state assoc :frame f) (seek-frame! f))}] (for [track (:project/tracks project)] ^{:key (:track/id track)} [:div.track [:div.track-name (:track/name track)] [:div.lane (for [c (:track/clips track)] ^{:key (:clip/id c)} [clip-view c total])]])]
-  [:footer (if-let [e (seq (nle/validate-project project))] (str "Errors: " e) "HTMLVideo decode • canvas effects • MediaRecorder WebM export")]]))
+  [:footer (if-let [e (seq (nle/validate-project project))] (str "Errors: " e) "HTMLVideo decode • graded canvas • capability-negotiated MediaRecorder export")]]))
 (defonce root-node (atom nil))
 (defn init! []
   (when-not @root-node
