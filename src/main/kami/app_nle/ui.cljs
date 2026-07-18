@@ -7,10 +7,11 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
+(defonce lane-audio-runtime (atom []))
 (defonce shortcuts-installed? (atom false))
 (defonce cache-restore-started? (atom false))
 (def recovery-key "kami-app-nle/recovery/v1")
@@ -20,6 +21,15 @@
       (.then (fn [digest]
                (apply str (map #(.padStart (.toString % 16) 2 "0")
                                (array-seq (js/Uint8Array. digest))))))))
+(defn decode-audio-blob! [blob]
+  (let [Ctor (or (.-AudioContext js/window) (.-webkitAudioContext js/window)) ctx (new Ctor)]
+    (-> (.arrayBuffer blob) (.then #(.decodeAudioData ctx %))
+        (.then (fn [buffer] (.close ctx) buffer))
+        (.catch (fn [error] (.close ctx) (throw error))))))
+(defn install-audio-buffer! [asset-id blob]
+  (-> (decode-audio-blob! blob)
+      (.then #(do (swap! state assoc-in [:audio-buffers asset-id] %) %))
+      (.catch #(swap! state assoc :project-error (str "Audio decode failed: " (.-message %))))))
 (defn cache-media! [sha256 name type blob]
   (-> (cache/put! {:sha256 sha256 :name name :type type :blob blob})
       (.catch #(js/console.warn "NLE media cache write failed" %))))
@@ -55,6 +65,8 @@
                                                 [asset-id {:name name :type type :sha256 sha256 :blob blob
                                                            :url (js/URL.createObjectURL blob)}]) hits))]
                      (swap! state update :assets merge assets)
+                     (doseq [{:keys [asset-id type blob]} hits :when (.startsWith (or type "") "audio/")]
+                       (install-audio-buffer! asset-id blob))
                      (swap! state assoc :cache-restoring? false :cache-restored-count (count hits))
                      (when (seq hits) (js/setTimeout #(seek-frame! (:frame @state)) 0)))))
           (.catch (fn [error]
@@ -115,6 +127,28 @@
                                           (cache-media! sha256 (.-name file) (.-type file) file))))))))
                 (js/Promise.resolve true) files)
         (.then #(when (seq files) (seek-frame! (:frame @state)))))))
+(defn load-audio! [event]
+  (let [files (array-seq (.. event -target -files))]
+    (-> (reduce (fn [promise file]
+                  (.then promise
+                         (fn []
+                           (-> (.all js/Promise #js [(sha256-file! file) (decode-audio-blob! file)])
+                               (.then (fn [values]
+                                        (let [sha256 (aget values 0) buffer (aget values 1)
+                                              source-id (or (nle/asset-id-by-signature (:project @state) {:name (.-name file) :sha256 sha256})
+                                                            (nle/next-asset-id (:project @state)))
+                                              frames (js/Math.max 1 (js/Math.round (* (.-duration buffer) (get-in @state [:project :project/fps]))))
+                                              url (js/URL.createObjectURL file)]
+                                          (when-let [old-url (get-in @state [:assets source-id :url])] (js/URL.revokeObjectURL old-url))
+                                          (swap! state (fn [s]
+                                                         (-> s (assoc-in [:assets source-id]
+                                                                         {:name (.-name file) :type (.-type file) :sha256 sha256 :blob file :url url})
+                                                             (assoc-in [:audio-buffers source-id] buffer)
+                                                             (update :project #(-> % (nle/register-asset source-id (.-name file) sha256)
+                                                                                    (nle/bind-audio-asset source-id (.-name file) frames))))))
+                                          (cache-media! sha256 (.-name file) (.-type file) file))))))))
+                (js/Promise.resolve true) files)
+        (.catch #(swap! state assoc :project-error (str "Audio import failed: " (.-message %)))))))
 (defn proxy-recorder-options []
   (let [preferred (:profile/mime nle/proxy-profile)
         mime (if (.isTypeSupported js/MediaRecorder preferred) preferred "video/webm;codecs=vp8")]
@@ -196,7 +230,7 @@
              (when (seq (:relink/matches plan)) (js/setTimeout #(seek-frame! (:frame @state)) 0)))))
         (.catch #(swap! state assoc :directory-searching? false :project-error (str "Directory search failed: " (.-message %)))))))
 (defn media-ready! [] (let [v (primary-video) c @canvas-node] (set! (.-width c) (or (.-videoWidth v) 1280)) (set! (.-height c) (or (.-videoHeight v) 720)) (set! (.-currentTime v) (/ (:pending-source-frame @state) (get-in @state [:project :project/fps]))) (swap! state assoc :decoded? true) (draw-frame!)))
-(declare ensure-export-audio! set-primary-audio! sync-master-eq!)
+(declare ensure-export-audio! set-primary-audio! sync-master-eq! schedule-audio-lanes! stop-lane-audio!)
 (defn toggle-play! []
   (when (:decoded? @state)
     (ensure-export-audio!)
@@ -204,7 +238,9 @@
     (when-let [clip (nle/clip-at-frame (:project @state) (:frame @state))]
       (when-let [segment (some #(when (= (:clip/id clip) (:segment/clip-id %)) %) (nle/render-segments (:project @state)))]
         (set-primary-audio! segment)))
-    (if (:playing? @state) (.pause (primary-video)) (.play (primary-video)))
+    (if (:playing? @state)
+      (do (.pause (primary-video)) (stop-lane-audio!))
+      (do (schedule-audio-lanes! (/ (:frame @state) (get-in @state [:project :project/fps]))) (.play (primary-video))))
     (swap! state update :playing? not)))
 (defn download-blob! [blob] (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")] (set! (.-href a) url) (set! (.-download a) "kami-nle-master.webm") (.click a) (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
 (defn download-project! []
@@ -296,7 +332,9 @@
                  (cache-media! (:media/sha256 descriptor) (:media/name descriptor) (:media/type descriptor) blob))
                (swap! state assoc :project project :selected (:clip/id first-clip)
                       :frame (or (:clip/start-frame first-clip) 0) :decoded? false :playing? false
-                      :project-error nil :assets assets)
+                      :project-error nil :assets assets :audio-buffers {})
+               (doseq [[asset-id asset] assets :when (.startsWith (or (:type asset) "") "audio/")]
+                 (install-audio-buffer! asset-id (:blob asset)))
                (seek-frame! (:frame @state)))))
           (.catch #(swap! state assoc :project-error (str "Package import failed: " (.-message %))))))))
 (defn load-project! [event]
@@ -308,7 +346,7 @@
                      (let [first-clip (first (nle/video-clips project))]
                        (doseq [[_ asset] (:assets @state) k [:url :proxy-url]] (when-let [url (get asset k)] (js/URL.revokeObjectURL url)))
                        (swap! state assoc :project project :selected (:clip/id first-clip)
-                              :frame (or (:clip/start-frame first-clip) 0) :decoded? false :playing? false :project-error nil :assets {}))
+                              :frame (or (:clip/start-frame first-clip) 0) :decoded? false :playing? false :project-error nil :assets {} :audio-buffers {}))
                      (swap! state assoc :project-error "Unsupported or invalid NLE project"))
                    (catch :default error (swap! state assoc :project-error (.-message error)))))))))
 (defn restore-recovery! []
@@ -384,7 +422,7 @@
                        :gain-a gain-a :gain-b gain-b :eq-a {:low low-a :mid mid-a :high high-a}
                        :eq-b {:low low-b :mid mid-b :high high-b}
                        :master-eq {:low master-low :mid master-mid :high master-high}
-                       :master master :analyser analyser}]
+                       :master-input master-low :master master :analyser analyser}]
           (apply-eq! (:master-eq runtime) (get-in @state [:project :project/master-eq]))
           (reset! export-audio runtime)))))
 (defn gain-for-video [video]
@@ -397,6 +435,32 @@
   (when @export-audio (apply-eq! (:master-eq @export-audio) (get-in @state [:project :project/master-eq]))))
 (defn sync-master-eq! []
   (when @export-audio (apply-eq! (:master-eq @export-audio) (get-in @state [:project :project/master-eq]))))
+(defn stop-lane-audio! []
+  (doseq [{:keys [source nodes]} @lane-audio-runtime]
+    (try (.stop source) (catch :default _ nil))
+    (doseq [node nodes] (try (.disconnect node) (catch :default _ nil))))
+  (reset! lane-audio-runtime []))
+(defn schedule-audio-lanes! [from-sec]
+  (stop-lane-audio!)
+  (when-let [{:keys [context master-input]} @export-audio]
+    (let [now (+ (.-currentTime context) 0.03)]
+      (doseq [segment (nle/audio-segments (:project @state))
+              :let [timeline-start (:segment/timeline-start-sec segment)
+                    elapsed (max 0 (- from-sec timeline-start))
+                    buffer (get-in @state [:audio-buffers (:segment/source-id segment)])
+                    offset (+ (:segment/source-start-sec segment) elapsed)
+                    duration (when buffer (min (- (:segment/duration-sec segment) elapsed)
+                                               (max 0 (- (.-duration buffer) offset))))]
+              :when (and buffer (pos? duration) (> (+ timeline-start (:segment/duration-sec segment)) from-sec))]
+        (let [source (.createBufferSource context) low (.createBiquadFilter context) mid (.createBiquadFilter context)
+              high (.createBiquadFilter context) gain (.createGain context)
+              delay (max 0 (- timeline-start from-sec))]
+          (set! (.-buffer source) buffer) (configure-eq-nodes! low mid high)
+          (apply-eq! {:low low :mid mid :high high} (:segment/audio-eq segment))
+          (set! (.. gain -gain -value) (:segment/audio-gain segment))
+          (.connect source low) (.connect low mid) (.connect mid high) (.connect high gain) (.connect gain master-input)
+          (.start source (+ now delay) offset duration)
+          (swap! lane-audio-runtime conj {:source source :nodes [source low mid high gain]}))))))
 (defn set-master-gain! [gain]
   (swap! state assoc :master-gain gain)
   (when-let [master (:master @export-audio)] (set! (.. master -gain -value) gain)))
@@ -466,10 +530,12 @@
               )))))
 (defn play-segments! [segments]
   (-> (prepare-video! (primary-video) (first segments))
-      (.then #(play-timeline-from! segments 0 0))))
+      (.then #(do (when (:exporting? @state) (schedule-audio-lanes! 0))
+                  (play-timeline-from! segments 0 0)))))
 (defn export-webm! []
-  (let [segments (nle/render-segments (:project @state))]
-    (when (and (seq segments) (every? #(get-in @state [:assets (:segment/source-id %) :url]) segments))
+  (let [segments (nle/render-segments (:project @state)) audio-segments (nle/audio-segments (:project @state))]
+    (when (and (seq segments) (every? #(get-in @state [:assets (:segment/source-id %) :url]) segments)
+               (every? #(get-in @state [:audio-buffers (:segment/source-id %)]) audio-segments))
       (let [stream (.captureStream @canvas-node (get-in @state [:project :project/fps]))
             {:keys [context destination]} (ensure-export-audio!)
             audio-track (first (array-seq (.getAudioTracks (.-stream destination))))
@@ -477,7 +543,7 @@
             recorder (js/MediaRecorder. stream (recorder-options (:project @state))) chunks (array)]
         (.resume context) (sync-master-eq!) (set-master-gain! (:master-gain @state)) (set-primary-audio! (first segments)) (swap! state assoc :exporting? true :playing? true)
         (set! (.-ondataavailable recorder) #(when (pos? (.. % -data -size)) (.push chunks (.-data %))))
-        (set! (.-onstop recorder) #(do (download-blob! (js/Blob. chunks #js {:type "video/webm"})) (swap! state dissoc :export-segment) (swap! state assoc :exporting? false :playing? false)))
+        (set! (.-onstop recorder) #(do (stop-lane-audio!) (download-blob! (js/Blob. chunks #js {:type "video/webm"})) (swap! state dissoc :export-segment) (swap! state assoc :exporting? false :playing? false)))
         (.start recorder 250)
         (-> (play-segments! segments) (.then #(.stop recorder))
             (.catch (fn [error] (js/console.error error) (.stop recorder))))))))
@@ -546,6 +612,8 @@
                     missing (nle/missing-asset-ids project (keys assets))]
  [:main [:header [:div [:small "KOTOBA-LANG / VIDEO"] [:h1 "KAMI NLE"]] [:div.transport [:button.primary {:on-click toggle-play! :disabled (not decoded?)} (if playing? "❚❚ Pause" "▶ Play decoded media")] [:output (nle/timecode frame fps)]]]
   [:section.workspace [:aside [:h2 "Project bin"] [:label.import "Import / relink V1 videos" [:input {:type "file" :accept "video/*" :multiple true :aria-label "Import or relink NLE videos" :on-change load-media!}]]
+    [:label.import "Import independent audio lanes" [:input {:type "file" :accept "audio/*" :multiple true
+                                                               :aria-label "Import NLE audio lanes" :on-change load-audio!}]]
     [:label.import "Search video directory" [:input {:type "file" :accept "video/*" :multiple true :webkitdirectory ""
                                                        :aria-label "Search NLE video directory" :on-change scan-video-directory!}]]
     (if (seq assets)

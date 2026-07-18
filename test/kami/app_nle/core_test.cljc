@@ -60,6 +60,16 @@
     (is (empty? (nle/validate-project equalized)))
     (is (= [[:invalid-clip-eq "c"]]
            (nle/validate-project (assoc-in equalized [:project/tracks 0 :track/clips 0 :clip/audio-eq :low-db] 30))))))
+(deftest independent-audio-lane-binding-and-render-authority
+  (let [bound (nle/bind-audio-asset p "asset:audio" "dialogue.wav" 90)
+        clip (first (nle/audio-clips bound)) segment (first (nle/audio-segments bound))]
+    (is (= ["asset:audio" 0 90] ((juxt :clip/source-id :clip/in-frame :clip/out-frame) clip)))
+    (is (= {:segment/clip-id (:clip/id clip) :segment/source-id "asset:audio"
+            :segment/timeline-start-sec 0 :segment/source-start-sec 0 :segment/duration-sec 3
+            :segment/audio-gain 1.0 :segment/audio-eq nle/flat-eq} segment))
+    (is (empty? (nle/validate-project bound)))
+    (is (= bound (nle/bind-audio-asset bound "asset:audio" "renamed.wav" 300)))
+    (is (= 2 (count (nle/audio-clips (nle/bind-audio-asset bound "asset:music" "music.wav" 120)))))))
 (deftest production-export-profile
   (is (= ["video/webm;codecs=vp8,opus" 2000000]
          ((juxt :profile/mime :profile/video-bps) (nle/export-profile p))))

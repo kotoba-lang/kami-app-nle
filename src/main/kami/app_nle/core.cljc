@@ -74,6 +74,26 @@
   (loop [index 0]
     (let [asset-id (str "asset:" index)]
       (if (contains? (:project/assets p) asset-id) (recur (inc index)) asset-id))))
+(defn bind-audio-asset [p asset-id name duration-frames]
+  (if (some #(= asset-id (:clip/source-id %))
+            (mapcat :track/clips (filter #(= :audio (:track/type %)) (:project/tracks p))))
+    p
+    (let [duration (max 1 duration-frames)
+        audio-index (first (keep-indexed #(when (= :audio (:track/type %2)) %1) (:project/tracks p)))]
+    (if (nil? audio-index)
+      (update p :project/tracks conj
+              {:track/id (str "audio:" (count (:project/tracks p))) :track/name "Audio" :track/type :audio
+               :track/clips [{:clip/id (str "audio-clip:" asset-id) :clip/name name :clip/source-id asset-id
+                              :clip/start-frame 0 :clip/in-frame 0 :clip/out-frame duration :clip/audio-gain 1.0}]})
+      (let [clips (get-in p [:project/tracks audio-index :track/clips])
+            missing-index (first (keep-indexed #(when (nil? (:clip/source-id %2)) %1) clips))]
+        (if (some? missing-index)
+          (update-in p [:project/tracks audio-index :track/clips missing-index]
+                     #(assoc % :clip/name (or (:clip/name %) name) :clip/source-id asset-id
+                               :clip/in-frame 0 :clip/out-frame duration))
+          (update-in p [:project/tracks audio-index :track/clips] conj
+                     {:clip/id (str "audio-clip:" asset-id) :clip/name name :clip/source-id asset-id
+                      :clip/start-frame 0 :clip/in-frame 0 :clip/out-frame duration :clip/audio-gain 1.0})))))))
 (defn export-profile [p] (get export-profiles (:project/export-profile p) (:review export-profiles)))
 (defn clip-end [c] (+ (:clip/start-frame c) (- (:clip/out-frame c) (:clip/in-frame c))))
 (defn duration-frames [p] (reduce max 0 (map clip-end (mapcat :track/clips (:project/tracks p)))))
@@ -202,6 +222,21 @@
                                 (or (nil? expected) (= expected (:media/sha256 descriptor))))))
                        media))
       {:project p :media media})))
+
+(defn audio-clips [p]
+  (->> (:project/tracks p) (filter #(= :audio (:track/type %))) (mapcat :track/clips)
+       (filter :clip/source-id) (sort-by :clip/start-frame) vec))
+
+(defn audio-segments [p]
+  (let [fps (:project/fps p)]
+    (mapv (fn [clip]
+            {:segment/clip-id (:clip/id clip) :segment/source-id (:clip/source-id clip)
+             :segment/timeline-start-sec (/ (:clip/start-frame clip) fps)
+             :segment/source-start-sec (/ (:clip/in-frame clip) fps)
+             :segment/duration-sec (/ (- (:clip/out-frame clip) (:clip/in-frame clip)) fps)
+             :segment/audio-gain (or (:clip/audio-gain clip) 1.0)
+             :segment/audio-eq (normalize-eq (:clip/audio-eq clip))})
+          (audio-clips p))))
 
 (defn video-clips [p]
   (->> (:project/tracks p) (filter #(= :video (:track/type %))) (mapcat :track/clips)
