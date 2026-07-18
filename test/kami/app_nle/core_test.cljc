@@ -47,3 +47,7 @@
   (is (= p (nle/accept-project p)))
   (is (nil? (nle/accept-project (assoc p :project/schema "foreign/v1"))))
   (is (nil? (nle/accept-project [:not :a :project]))))
+(deftest versioned-crash-recovery
+  (is (= p (nle/recover-project (nle/recovery-envelope p))))
+  (is (nil? (nle/recover-project {:recovery/version 999 :recovery/project p})))
+  (is (nil? (nle/recover-project {:recovery/version 1 :recovery/project (assoc p :project/schema "foreign/v1")}))))
