@@ -8,7 +8,7 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :caption-text "" :caption-duration-frames 60 :caption-language "en" :caption-position :bottom :caption-align :center :caption-font-scale 1.0 :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :caption-text "" :caption-duration-frames 60 :caption-language "en" :caption-position :bottom :caption-align :center :caption-font-scale 1.0 :review-author "editor" :caption-review-drafts {} :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
@@ -822,6 +822,8 @@
                                                            (max 1 (js/parseInt (.. % -target -value))))}]]
     [:label "New caption language" [:input {:value (:caption-language @state) :aria-label "New caption language"
                                                :on-change #(swap! state assoc :caption-language (.. % -target -value))}]]
+    [:label "Review actor" [:input {:value (:review-author @state) :aria-label "Caption review actor"
+                                      :on-change #(swap! state assoc :review-author (.. % -target -value))}]]
     [:label.import "Import WebVTT for language"
      [:input {:type "file" :accept ".vtt,text/vtt" :aria-label "Import WebVTT"
               :on-change import-webvtt!}]]
@@ -860,9 +862,25 @@
                                    {:caption/language (.. % -target -value)})}]
        [:select {:value (name (nle/caption-status caption)) :aria-label (str (:caption/id caption) " status")
                  :on-change #(swap! state update :project nle/set-caption-status (:caption/id caption)
-                                    (keyword (.. % -target -value)))}
+                                    (keyword (.. % -target -value)) (:review-author @state) (js/Date.now))}
         [:option {:value "draft"} "Draft"] [:option {:value "review"} "In review"]
         [:option {:value "approved"} "Approved"]]
+       [:textarea {:value (get-in @state [:caption-review-drafts (:caption/id caption)] "")
+                   :aria-label (str (:caption/id caption) " review note")
+                   :on-change #(swap! state assoc-in [:caption-review-drafts (:caption/id caption)]
+                                      (.. % -target -value))}]
+       [:button {:aria-label (str "Add review note to " (:caption/id caption))
+                 :disabled (str/blank? (get-in @state [:caption-review-drafts (:caption/id caption)] ""))
+                 :on-click #(let [now (js/Date.now)]
+                              (swap! state update :project nle/add-caption-review-note (:caption/id caption)
+                                     (str "review:" now) (:review-author @state)
+                                     (get-in @state [:caption-review-drafts (:caption/id caption)]) now)
+                              (swap! state assoc-in [:caption-review-drafts (:caption/id caption)] ""))} "Add review note"]
+       (for [note (:caption/review-notes caption)]
+         ^{:key (:review/id note)} [:small (str (:review/author note) ": " (:review/text note))])
+       (when-let [entry (last (:caption/status-history caption))]
+         [:small (str "Status " (name (:status/from entry)) " → " (name (:status/to entry))
+                      " by " (:status/actor entry))])
        [:input {:type "number" :min 0 :value (:caption/start-frame caption)
                 :aria-label (str (:caption/id caption) " start frame")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)

@@ -107,11 +107,33 @@
     (assoc p :project/caption-language language) p))
 (defn remove-caption [p caption-id]
   (update p :project/captions #(vec (remove (fn [caption] (= caption-id (:caption/id caption))) %))))
-(defn set-caption-status [p caption-id status]
-  (if (contains? caption-statuses status)
+(defn set-caption-status
+  ([p caption-id status] (set-caption-status p caption-id status "system" 0))
+  ([p caption-id status actor changed-at]
+   (if (and (contains? caption-statuses status) (string? actor) (not (str/blank? actor))
+            (number? changed-at) (not (neg? changed-at)))
+     (update p :project/captions
+             #(mapv (fn [caption]
+                      (if (and (= caption-id (:caption/id caption)) (not= status (caption-status caption)))
+                        (-> caption
+                            (assoc :caption/status status)
+                            (update :caption/status-history (fnil conj [])
+                                    {:status/from (caption-status caption) :status/to status
+                                     :status/actor actor :status/at changed-at}))
+                        caption)) %))
+     p)))
+(defn add-caption-review-note [p caption-id note-id author text created-at]
+  (if (and (string? note-id) (not (str/blank? note-id))
+           (string? author) (not (str/blank? author))
+           (string? text) (not (str/blank? text))
+           (number? created-at) (not (neg? created-at)))
     (update p :project/captions
-            #(mapv (fn [caption] (if (= caption-id (:caption/id caption))
-                                   (assoc caption :caption/status status) caption)) %))
+            #(mapv (fn [caption]
+                     (if (and (= caption-id (:caption/id caption))
+                              (not (some (fn [note] (= note-id (:review/id note))) (:caption/review-notes caption))))
+                       (update caption :caption/review-notes (fnil conj [])
+                               {:review/id note-id :review/author author :review/text text :review/at created-at})
+                       caption)) %))
     p))
 (defn clone-caption-language [p source-language target-language]
   (let [source (normalize-language source-language) target (normalize-language target-language)
@@ -120,8 +142,10 @@
              (= target-language target))
       (let [retained (remove #(= target (caption-language %)) (:project/captions p))
             cloned (map-indexed (fn [index caption]
-                                  (assoc caption :caption/id (str "translation:" target ":" index)
-                                                 :caption/language target :caption/status :draft)) source-captions)]
+                                  (-> caption
+                                      (assoc :caption/id (str "translation:" target ":" index)
+                                             :caption/language target :caption/status :draft
+                                             :caption/review-notes [] :caption/status-history []))) source-captions)]
         (assoc p :project/captions (->> (concat retained cloned)
                                         (sort-by (juxt :caption/start-frame :caption/id)) vec)
                  :project/caption-language target))
@@ -401,6 +425,24 @@
                   (and (:caption/language caption)
                        (not (re-matches language-pattern (:caption/language caption))))
                   (and (:caption/status caption) (not (contains? caption-statuses (:caption/status caption))))
+                  (some (fn [note]
+                          (or (not (string? (:review/id note))) (str/blank? (:review/id note))
+                              (not (string? (:review/author note))) (str/blank? (:review/author note))
+                              (not (string? (:review/text note))) (str/blank? (:review/text note))
+                              (not (number? (:review/at note))) (neg? (or (:review/at note) -1))))
+                        (:caption/review-notes caption))
+                  (and (seq (:caption/review-notes caption))
+                       (not (apply <= (map :review/at (:caption/review-notes caption)))))
+                  (not= (count (:caption/review-notes caption))
+                        (count (set (map :review/id (:caption/review-notes caption)))))
+                  (some (fn [entry]
+                          (or (not (contains? caption-statuses (:status/from entry)))
+                              (not (contains? caption-statuses (:status/to entry)))
+                              (not (string? (:status/actor entry))) (str/blank? (:status/actor entry))
+                              (not (number? (:status/at entry))) (neg? (or (:status/at entry) -1))))
+                        (:caption/status-history caption))
+                  (and (seq (:caption/status-history caption))
+                       (not (apply <= (map :status/at (:caption/status-history caption)))))
                   (and (:caption/style caption)
                        (not= (:caption/style caption) (normalize-caption-style (:caption/style caption))))
                   (neg? (:caption/start-frame caption))
