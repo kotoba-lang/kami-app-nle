@@ -8,7 +8,7 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :caption-text "" :caption-duration-frames 60 :caption-position :bottom :caption-align :center :caption-font-scale 1.0 :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :caption-text "" :caption-duration-frames 60 :caption-language "en" :caption-position :bottom :caption-align :center :caption-font-scale 1.0 :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
@@ -294,12 +294,14 @@
   (let [text (:caption-text @state) start (:frame @state) duration (:caption-duration-frames @state)]
     (when (seq text)
       (swap! state update :project nle/add-caption (str "caption:" (js/Date.now)) start (+ start duration) text
+             (:caption-language @state)
              {:caption/position (:caption-position @state) :caption/align (:caption-align @state)
               :caption/font-scale (:caption-font-scale @state)})
       (swap! state assoc :caption-text ""))))
 (defn export-webvtt! []
-  (download-file! (js/Blob. #js [(nle/webvtt (:project @state))] #js {:type "text/vtt;charset=utf-8"})
-                  "kami-nle-captions.vtt"))
+  (let [language (nle/normalize-language (get-in @state [:project :project/caption-language]))]
+    (download-file! (js/Blob. #js [(nle/webvtt (:project @state) language)] #js {:type "text/vtt;charset=utf-8"})
+                    (str "kami-nle-captions-" language ".vtt"))))
 (defn export-package! []
   (let [project (:project @state) asset-ids (sort (keys (:project/assets project)))
         missing (vec (remove #(get-in @state [:assets % :blob]) asset-ids))
@@ -810,6 +812,15 @@
                                         :aria-label "New caption duration frames"
                                         :on-change #(swap! state assoc :caption-duration-frames
                                                            (max 1 (js/parseInt (.. % -target -value))))}]]
+    [:label "New caption language" [:input {:value (:caption-language @state) :aria-label "New caption language"
+                                               :on-change #(swap! state assoc :caption-language (.. % -target -value))}]]
+    [:label "Burn-in / export language"
+     [:select {:value (nle/normalize-language (:project/caption-language project))
+               :aria-label "Active caption language"
+               :on-change #(swap! state update :project nle/set-caption-language (.. % -target -value))}
+      (for [language (distinct (concat [(nle/normalize-language (:project/caption-language project))]
+                                       (nle/caption-languages project)))]
+        ^{:key language} [:option {:value language} language])]]
     [:label "Caption position" [:select {:value (name (:caption-position @state)) :aria-label "New caption position"
                                            :on-change #(swap! state assoc :caption-position (keyword (.. % -target -value)))}
                                 [:option {:value "bottom"} "Bottom"] [:option {:value "top"} "Top"]]]
@@ -827,6 +838,9 @@
        [:input {:value (:caption/text caption) :aria-label (str (:caption/id caption) " text")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
                                    {:caption/text (.. % -target -value)})}]
+       [:input {:value (nle/caption-language caption) :aria-label (str (:caption/id caption) " language")
+                :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
+                                   {:caption/language (.. % -target -value)})}]
        [:input {:type "number" :min 0 :value (:caption/start-frame caption)
                 :aria-label (str (:caption/id caption) " start frame")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
