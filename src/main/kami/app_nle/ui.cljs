@@ -442,9 +442,17 @@
   (when (seq value)
     (let [number (if (= property :font-scale) (imsc-font-scale value) (js/parseFloat value))]
       (when (js/Number.isFinite number) number))))
+(defn imsc-number-list [text separator]
+  (when (seq text)
+    (let [values (mapv js/parseFloat (str/split text separator))]
+      (when (every? js/Number.isFinite values) values))))
+(defn imsc-spline-list [text]
+  (when (seq text)
+    (let [splines (mapv #(imsc-number-list (str/trim %) #"[ ,]+") (str/split text #";"))]
+      (when (every? some? splines) splines))))
 (defn imsc-animations [node fps cue-start cue-end]
   (->> (array-seq (.getElementsByTagNameNS node ttml-namespace "animate"))
-       (keep (fn [animation]
+       (mapcat (fn [animation]
                (let [attribute (str/replace (.getAttribute animation "attributeName") "tts:" "")
                      property ({"opacity" :opacity "fontSize" :font-scale} attribute)
                      from (imsc-animation-value property (.getAttribute animation "from"))
@@ -458,16 +466,26 @@
                                   (let [values (mapv js/parseFloat
                                                      (str/split (str/trim (.getAttribute animation "keySplines")) #"[ ,]+"))]
                                     (when (and (= 4 (count values)) (every? js/Number.isFinite values)) values)))
+                     values (when-let [text (not-empty (.getAttribute animation "values"))]
+                              (let [raw (str/split text #";")]
+                                (mapv #(imsc-animation-value property (str/trim %)) raw)))
+                     key-times (imsc-number-list (.getAttribute animation "keyTimes") #";")
+                     key-splines (imsc-spline-list (.getAttribute animation "keySplines"))
                      start (when (number? begin) (+ cue-start begin))
                      end (cond (and start (number? duration)) (+ start duration)
                                (number? explicit-end) (+ cue-start explicit-end))]
-                 (when (and property (number? from) (number? to) start end (< start end)
-                            (or (not= :spline calc-mode) key-spline)
-                            (< start cue-end) (> end cue-start))
-                   (cond-> {:animation/property property :animation/from from :animation/to to
-                            :animation/interpolation calc-mode
-                            :animation/start-frame (max cue-start start) :animation/end-frame (min cue-end end)}
-                     key-spline (assoc :animation/key-spline key-spline))))))
+                 (cond
+                   (and property values key-times start end (< start end))
+                   (nle/animation-keyframe-segments property values key-times calc-mode key-splines
+                                                    (max cue-start start) (min cue-end end))
+                   (and property (number? from) (number? to) start end (< start end)
+                        (or (not= :spline calc-mode) key-spline)
+                        (< start cue-end) (> end cue-start))
+                   [(cond-> {:animation/property property :animation/from from :animation/to to
+                             :animation/interpolation calc-mode
+                             :animation/start-frame (max cue-start start) :animation/end-frame (min cue-end end)}
+                      key-spline (assoc :animation/key-spline key-spline))]
+                   :else []))))
        (take 16) vec))
 (defn clip-caption-animations [animations start end]
   (vec (keep #(nle/clip-animation % start end) animations)))

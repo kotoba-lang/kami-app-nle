@@ -224,6 +224,18 @@
                   (assoc style :caption/animations
                          [(assoc (first (:caption/animations style))
                                  :animation/key-spline [0.8 0 0.2 1])])))))))
+(deftest multi-keyframe-animation-expands-to-authoritative-segments
+  (let [segments (nle/animation-keyframe-segments
+                  :opacity [0 0.25 1] [0 0.2 1] :spline
+                  [[0.42 0 1 1] [0 0 0.58 1]] 30 130)
+        style (assoc nle/default-caption-style :caption/animations segments)
+        project (-> p (nle/add-caption "keys" 30 130 "Keys" "en" style)
+                    (nle/set-caption-status "keys" :approved "editor" 1))
+        caption (first (:project/captions project)) xml (nle/imsc1 project "en")]
+    (is (= [[30 50] [50 130]] (mapv (juxt :animation/start-frame :animation/end-frame) segments)))
+    (is (< (Math/abs (- 0.25 (:caption/opacity (nle/caption-style-at-frame caption 50)))) 1.0e-8))
+    (is (= 2 (count (re-seq #"calcMode=\"spline\"" xml))))
+    (is (empty? (nle/animation-keyframe-segments :opacity [0 1 0] [0 0.8 0.7] :linear [] 0 30)))))
 (deftest multilingual-caption-selection-and-delivery
   (let [localized (-> p
                       (nle/add-caption "en-1" 0 60 "Hello" "en" nle/default-caption-style)

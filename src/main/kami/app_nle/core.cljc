@@ -90,6 +90,31 @@
       :color/contrast (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
       :color/saturation (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
       p)))
+(defn animation-keyframe-segments [property values key-times interpolation key-splines start end]
+  (let [segment-count (dec (count values))
+        frame-at (fn [ratio] (+ start (long (#?(:clj Math/round :cljs js/Math.round)
+                                                (double (* (- end start) ratio))))))]
+    (if (and (contains? #{:opacity :font-scale} property)
+             (<= 2 (count values) 17) (= (count values) (count key-times))
+             (= 0.0 (double (first key-times))) (= 1.0 (double (last key-times)))
+             (apply < key-times) (every? #(and (number? %) (<= 0 % 1)) key-times)
+             (every? number? values) (nat-int? start) (pos-int? end) (< start end)
+             (contains? #{:linear :discrete :spline} interpolation)
+             (or (not= :spline interpolation)
+                 (and (= segment-count (count key-splines))
+                      (every? #(and (vector? %) (= 4 (count %))
+                                    (every? (fn [x] (and (number? x) (<= 0 x 1))) %)
+                                    (<= (first %) (nth % 2))) key-splines))))
+      (mapv (fn [index]
+              (cond-> {:animation/property property
+                       :animation/from (nth values index) :animation/to (nth values (inc index))
+                       :animation/start-frame (frame-at (nth key-times index))
+                       :animation/end-frame (frame-at (nth key-times (inc index)))
+                       :animation/interpolation interpolation
+                       :animation/keyframe-group true}
+                (= :spline interpolation) (assoc :animation/key-spline (nth key-splines index))))
+            (range segment-count))
+      [])))
 (defn normalize-caption-style [style]
   (let [ruby-runs (->> (:caption/ruby-runs style)
                        (keep (fn [run]
@@ -166,12 +191,16 @@
              :animation/from (animation-value-at animation clipped-start)
              :animation/to (animation-value-at animation clipped-end)))))
 (defn caption-style-at-frame [caption frame]
-  (let [style (normalize-caption-style (:caption/style caption))]
+  (let [style (normalize-caption-style (:caption/style caption))
+        active (for [[_ animations] (group-by :animation/property (:caption/animations style))
+                     :let [ordered (sort-by :animation/start-frame animations)]]
+                 (or (last (filter #(<= (:animation/start-frame %) frame) ordered))
+                     (first ordered)))]
     (reduce (fn [current {:animation/keys [property] :as animation}]
               (let [value (animation-value-at animation frame)]
                 (case property :opacity (assoc current :caption/opacity value)
                                :font-scale (assoc current :caption/font-scale value) current)))
-            style (:caption/animations style))))
+            style active)))
 (def language-pattern #"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 (def caption-statuses #{:draft :review :approved})
 (defn caption-status [caption] (if (contains? caption-statuses (:caption/status caption))
