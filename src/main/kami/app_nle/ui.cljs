@@ -452,19 +452,28 @@
                      begin (nle/imsc-time->frame (or (not-empty (.getAttribute animation "begin")) "0s") fps)
                      duration (nle/imsc-time->frame (.getAttribute animation "dur") fps)
                      explicit-end (nle/imsc-time->frame (.getAttribute animation "end") fps)
+                     calc-mode (case (.getAttribute animation "calcMode")
+                                 "discrete" :discrete "spline" :spline :linear)
+                     key-spline (when (= :spline calc-mode)
+                                  (let [values (mapv js/parseFloat
+                                                     (str/split (str/trim (.getAttribute animation "keySplines")) #"[ ,]+"))]
+                                    (when (and (= 4 (count values)) (every? js/Number.isFinite values)) values)))
                      start (when (number? begin) (+ cue-start begin))
                      end (cond (and start (number? duration)) (+ start duration)
                                (number? explicit-end) (+ cue-start explicit-end))]
                  (when (and property (number? from) (number? to) start end (< start end)
+                            (or (not= :spline calc-mode) key-spline)
                             (< start cue-end) (> end cue-start))
-                   {:animation/property property :animation/from from :animation/to to
-                    :animation/start-frame (max cue-start start) :animation/end-frame (min cue-end end)}))))
+                   (cond-> {:animation/property property :animation/from from :animation/to to
+                            :animation/interpolation calc-mode
+                            :animation/start-frame (max cue-start start) :animation/end-frame (min cue-end end)}
+                     key-spline (assoc :animation/key-spline key-spline))))))
        (take 16) vec))
 (defn clip-caption-animations [animations start end]
   (vec (keep (fn [{animation-start :animation/start-frame animation-end :animation/end-frame
                    from :animation/from to :animation/to :as animation}]
                (let [clipped-start (max start animation-start) clipped-end (min end animation-end)
-                     value-at (fn [frame] (+ from (* (/ (- frame animation-start) (- animation-end animation-start)) (- to from))))]
+                     value-at (fn [frame] (nle/animation-value-at animation frame))]
                  (when (< clipped-start clipped-end)
                    (assoc animation :animation/start-frame clipped-start :animation/end-frame clipped-end
                           :animation/from (value-at clipped-start) :animation/to (value-at clipped-end)))))
@@ -1175,8 +1184,9 @@
         (str/join " ⏎ " (nle/caption-line-breaks (:caption/text caption) (nle/caption-language caption) 24))]
        (when-let [animations (seq (:caption/animations (nle/normalize-caption-style (:caption/style caption))))]
          [:small {:aria-label (str (:caption/id caption) " animation summary")}
-          (str/join ", " (map (fn [{:animation/keys [property start-frame end-frame]}]
-                                  (str (name property) " " start-frame "→" end-frame)) animations))])
+          (str/join ", " (map (fn [{:animation/keys [property start-frame end-frame interpolation]}]
+                                  (str (name property) " " (name interpolation) " "
+                                       start-frame "→" end-frame)) animations))])
        [:input {:value (nle/caption-language caption) :aria-label (str (:caption/id caption) " language")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
                                    {:caption/language (.. % -target -value)})}]

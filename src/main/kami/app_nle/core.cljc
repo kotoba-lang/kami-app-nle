@@ -103,13 +103,22 @@
                                 (let [property (:animation/property animation)
                                       from (:animation/from animation) to (:animation/to animation)
                                       start (:animation/start-frame animation) end (:animation/end-frame animation)
+                                      interpolation (or (:animation/interpolation animation) :linear)
+                                      spline (:animation/key-spline animation)
                                       bounds (case property :opacity [0.0 1.0] :font-scale [0.5 2.0] nil)]
                                   (when (and bounds (number? from) (number? to) (nat-int? start)
-                                             (pos-int? end) (< start end))
-                                    {:animation/property property
-                                     :animation/from (double (clamp (first bounds) (second bounds) from))
-                                     :animation/to (double (clamp (first bounds) (second bounds) to))
-                                     :animation/start-frame start :animation/end-frame end}))))
+                                             (pos-int? end) (< start end)
+                                             (contains? #{:linear :discrete :spline} interpolation)
+                                             (or (not= :spline interpolation)
+                                                 (and (vector? spline) (= 4 (count spline))
+                                                      (every? #(and (number? %) (<= 0 % 1)) spline)
+                                                      (<= (first spline) (nth spline 2)))))
+                                    (cond-> {:animation/property property
+                                             :animation/from (double (clamp (first bounds) (second bounds) from))
+                                             :animation/to (double (clamp (first bounds) (second bounds) to))
+                                             :animation/start-frame start :animation/end-frame end
+                                             :animation/interpolation interpolation}
+                                      (= :spline interpolation) (assoc :animation/key-spline (mapv double spline)))))))
                         (take 16) vec)]
    (cond-> {:caption/position (if (contains? #{:top :bottom} (:caption/position style)) (:caption/position style) :bottom)
            :caption/align (if (contains? #{:left :center :right} (:caption/align style)) (:caption/align style) :center)
@@ -128,13 +137,30 @@
     (number? (:caption/opacity style)) (assoc :caption/opacity (clamp 0.0 1.0 (:caption/opacity style)))
     (seq ruby-runs) (assoc :caption/ruby-runs ruby-runs)
     (seq animations) (assoc :caption/animations animations))))
+(defn cubic-bezier-coordinate [p1 p2 t]
+  (let [inverse (- 1.0 t)]
+    (+ (* 3 inverse inverse t p1) (* 3 inverse t t p2) (* t t t))))
+(defn spline-progress [[x1 y1 x2 y2] ratio]
+  (loop [low 0.0 high 1.0 iteration 0]
+    (let [t (/ (+ low high) 2.0)
+          x (cubic-bezier-coordinate x1 x2 t)]
+      (if (= iteration 18)
+        (cubic-bezier-coordinate y1 y2 t)
+        (if (< x ratio) (recur t high (inc iteration)) (recur low t (inc iteration)))))))
+(defn animation-progress [{:animation/keys [interpolation key-spline]} ratio]
+  (case interpolation
+    :discrete (if (< ratio 1.0) 0.0 1.0)
+    :spline (spline-progress key-spline ratio)
+    ratio))
+(defn animation-value-at [{:animation/keys [from to start-frame end-frame] :as animation} frame]
+  (let [ratio (cond (<= frame start-frame) 0.0
+                    (>= frame end-frame) 1.0
+                    :else (/ (- frame start-frame) (- end-frame start-frame)))]
+    (double (+ from (* (animation-progress animation ratio) (- to from))))))
 (defn caption-style-at-frame [caption frame]
   (let [style (normalize-caption-style (:caption/style caption))]
-    (reduce (fn [current {:animation/keys [property from to start-frame end-frame]}]
-              (let [ratio (cond (<= frame start-frame) 0.0
-                                (>= frame end-frame) 1.0
-                                :else (/ (- frame start-frame) (- end-frame start-frame)))
-                    value (double (+ from (* ratio (- to from))))]
+    (reduce (fn [current {:animation/keys [property] :as animation}]
+              (let [value (animation-value-at animation frame)]
                 (case property :opacity (assoc current :caption/opacity value)
                                :font-scale (assoc current :caption/font-scale value) current)))
             style (:caption/animations style))))
@@ -464,7 +490,7 @@
 (defn- imsc-animation-elements [caption fps]
   (let [caption-start (:caption/start-frame caption)]
     (apply str
-           (for [{:animation/keys [property from to start-frame end-frame]}
+           (for [{:animation/keys [property from to start-frame end-frame interpolation key-spline]}
                  (:caption/animations (normalize-caption-style (:caption/style caption)))
                  :let [attribute (case property :opacity "tts:opacity" :font-scale "tts:fontSize")
                        encode (fn [value] (if (= property :font-scale)
@@ -474,7 +500,10 @@
                   "\" to=\"" (encode to) "\" begin=\""
                   (canonical-decimal (/ (- start-frame caption-start) (double fps)))
                   "s\" dur=\"" (canonical-decimal (/ (- end-frame start-frame) (double fps)))
-                  "s\" fill=\"freeze\"/>")))))
+                  "s\" calcMode=\"" (name interpolation) "\""
+                  (when (= :spline interpolation)
+                    (str " keySplines=\"" (str/join " " (map canonical-decimal key-spline)) "\""))
+                  " fill=\"freeze\"/>")))))
 (defn- xml-ncname [index value]
   (str "cue-" index "-" (str/replace (str value) #"[^A-Za-z0-9_.-]" "-")))
 (defn caption-custom-region? [style]
