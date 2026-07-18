@@ -15,6 +15,9 @@
 (defn update-clip [p id f] (update p :project/tracks #(mapv (fn [t] (update t :track/clips (fn [cs] (mapv (fn [c] (if (= id (:clip/id c)) (f c) c)) cs)))) %)))
 (defn move-clip [p id frame] (update-clip p id #(assoc % :clip/start-frame (max 0 frame))))
 (defn trim-clip [p id in-frame out-frame] (if (< in-frame out-frame) (update-clip p id #(assoc % :clip/in-frame in-frame :clip/out-frame out-frame)) p))
+(defn set-transition [p id transition-type duration-frames]
+  (update-clip p id #(assoc % :clip/transition-out {:transition/type transition-type
+                                                     :transition/duration-frames (max 0 duration-frames)})))
 (defn split-clip [p id frame new-id]
   (update p :project/tracks
           (fn [tracks]
@@ -51,5 +54,14 @@
             {:segment/clip-id (:clip/id clip) :segment/source-id (:clip/source-id clip)
              :segment/timeline-start-sec (/ (:clip/start-frame clip) fps)
              :segment/source-start-sec (/ (:clip/in-frame clip) fps)
-             :segment/duration-sec (/ (- (:clip/out-frame clip) (:clip/in-frame clip)) fps)})
+             :segment/duration-sec (/ (- (:clip/out-frame clip) (:clip/in-frame clip)) fps)
+             :segment/transition-out (:clip/transition-out clip)})
           (video-clips p))))
+
+(defn timeline-relations [p]
+  (mapv (fn [[left right]]
+          (let [delta (- (:clip/start-frame right) (clip-end left))]
+            {:left (:clip/id left) :right (:clip/id right)
+             :relation (cond (pos? delta) :gap (neg? delta) :overlap :else :contiguous)
+             :frames (abs delta)}))
+        (partition 2 1 (video-clips p))))
