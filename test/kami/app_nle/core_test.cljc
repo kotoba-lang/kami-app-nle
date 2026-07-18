@@ -198,8 +198,32 @@
     (is (= 0.5 (:caption/opacity mid)))
     (is (= 1.25 (:caption/font-scale mid)))
     (is (= 1.0 (:caption/opacity (nle/caption-style-at-frame caption 60))))
-    (is (str/includes? xml "<animate attributeName=\"tts:opacity\" from=\"0.0\" to=\"1.0\" begin=\"0.0s\" dur=\"1.0s\" fill=\"freeze\"/>"))
+    (is (str/includes? xml "<animate attributeName=\"tts:opacity\" from=\"0.0\" to=\"1.0\" begin=\"0.0s\" dur=\"1.0s\" calcMode=\"linear\" fill=\"freeze\"/>"))
     (is (str/includes? xml "attributeName=\"tts:fontSize\" from=\"100.0%\" to=\"150.0%\""))))
+(deftest spline-and-discrete-caption-animation-share-preview-and-imsc-authority
+  (let [style (assoc nle/default-caption-style :caption/animations
+                     [{:animation/property :opacity :animation/from 0 :animation/to 1
+                       :animation/start-frame 0 :animation/end-frame 30
+                       :animation/interpolation :spline
+                       :animation/key-spline [0.42 0.0 1.0 1.0]}
+                      {:animation/property :font-scale :animation/from 1 :animation/to 1.5
+                       :animation/start-frame 0 :animation/end-frame 30
+                       :animation/interpolation :discrete}])
+        project (-> p (nle/add-caption "eased" 0 60 "Ease" "en" style)
+                    (nle/set-caption-status "eased" :approved "editor" 1))
+        caption (first (:project/captions project))
+        mid (nle/caption-style-at-frame caption 15)
+        xml (nle/imsc1 project "en")]
+    (is (< 0.2 (:caption/opacity mid) 0.4))
+    (is (= 1.0 (:caption/font-scale mid)))
+    (is (= 1.5 (:caption/font-scale (nle/caption-style-at-frame caption 30))))
+    (is (str/includes? xml "calcMode=\"spline\" keySplines=\"0.42 0.0 1.0 1.0\""))
+    (is (str/includes? xml "calcMode=\"discrete\""))
+    (is (empty? (:caption/animations
+                 (nle/normalize-caption-style
+                  (assoc style :caption/animations
+                         [(assoc (first (:caption/animations style))
+                                 :animation/key-spline [0.8 0 0.2 1])])))))))
 (deftest multilingual-caption-selection-and-delivery
   (let [localized (-> p
                       (nle/add-caption "en-1" 0 60 "Hello" "en" nle/default-caption-style)
