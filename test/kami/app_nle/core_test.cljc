@@ -168,6 +168,15 @@
     (is (str/includes? xml "tts:writingMode=\"rltb\""))
     (is (str/includes? xml "tts:padding=\"2.0% 3.0% 4.0% 5.0%\""))
     (is (str/includes? xml "tts:displayAlign=\"center\""))))
+(deftest caption-ruby-runs-round-trip-to-imsc
+  (let [style (assoc nle/default-caption-style :caption/ruby-runs
+                     [{:ruby/base "漢字" :ruby/text "かんじ"}])
+        project (nle/add-caption p "ruby" 0 30 "この漢字です" "ja" style)
+        xml (nle/imsc1 project "ja")]
+    (is (= [{:ruby/base "漢字" :ruby/text "かんじ"}]
+           (get-in project [:project/captions 0 :caption/style :caption/ruby-runs])))
+    (is (str/includes? xml "この<span tts:ruby=\"container\"><span tts:ruby=\"base\">漢字</span><span tts:ruby=\"text\">かんじ</span></span>です"))
+    (is (empty? (nle/validate-project project)))))
 (deftest multilingual-caption-selection-and-delivery
   (let [localized (-> p
                       (nle/add-caption "en-1" 0 60 "Hello" "en" nle/default-caption-style)
