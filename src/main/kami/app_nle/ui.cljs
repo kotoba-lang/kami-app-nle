@@ -12,4 +12,8 @@
   [:section.timeline [:input.scrub {:type "range" :min 0 :max total :value frame :aria-label "Playhead" :on-change #(swap! state assoc :frame (js/parseInt (.. % -target -value)))}]
    (for [track (:project/tracks project)] ^{:key (:track/id track)} [:div.track [:div.track-name (:track/name track)] [:div.lane (for [c (:track/clips track)] ^{:key (:clip/id c)} [clip-view c total])]])]
   [:footer (if-let [e (seq (nle/validate-project project))] (str "Errors: " e) "EDN project valid • non-linear frame editor")]]))
-(defn init! [] (rdom/render-root (.getElementById js/document "app") [app]))
+(defonce root-node (atom nil))
+(defn init! []
+  (when-not @root-node
+    (reset! root-node (rdom/create-root (.getElementById js/document "app"))))
+  (rdom/render @root-node [app]))
