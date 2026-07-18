@@ -3,8 +3,15 @@
 (defn project [m] (merge {:project/schema schema :project/fps 30 :project/tracks []} m))
 (defn clip-end [c] (+ (:clip/start-frame c) (- (:clip/out-frame c) (:clip/in-frame c))))
 (defn duration-frames [p] (reduce max 0 (map clip-end (mapcat :track/clips (:project/tracks p)))))
-(defn timecode [frame fps] (let [s (quot frame fps) f (mod frame fps) m (quot s 60) s (mod s 60) h (quot m 60) m (mod m 60)]
-  (format "%02d:%02d:%02d:%02d" h m s f)))
+(defn- pad2 [n] (if (< n 10) (str "0" n) (str n)))
+(defn timecode [frame fps]
+  (let [seconds-total (quot frame fps)
+        f (mod frame fps)
+        minutes-total (quot seconds-total 60)
+        s (mod seconds-total 60)
+        h (quot minutes-total 60)
+        m (mod minutes-total 60)]
+    (str (pad2 h) ":" (pad2 m) ":" (pad2 s) ":" (pad2 f))))
 (defn update-clip [p id f] (update p :project/tracks #(mapv (fn [t] (update t :track/clips (fn [cs] (mapv (fn [c] (if (= id (:clip/id c)) (f c) c)) cs)))) %)))
 (defn move-clip [p id frame] (update-clip p id #(assoc % :clip/start-frame (max 0 frame))))
 (defn trim-clip [p id in-frame out-frame] (if (< in-frame out-frame) (update-clip p id #(assoc % :clip/in-frame in-frame :clip/out-frame out-frame)) p))
