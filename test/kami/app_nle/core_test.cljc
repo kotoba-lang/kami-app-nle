@@ -163,6 +163,21 @@
     (is (empty? (nle/validate-project japanese)))
     (is (= [:invalid-caption-language]
            (nle/validate-project (assoc japanese :project/caption-language "not valid"))))))
+(deftest webvtt-import-replaces-one-language-and-round-trips
+  (let [base (-> p
+                 (nle/add-caption "en-old" 0 30 "Old" "en" nle/default-caption-style)
+                 (nle/add-caption "ja-old" 0 30 "残す" "ja" nle/default-caption-style))
+        source "﻿WEBVTT imported captions\nKind: captions\n\nNOTE translator context\nDo not import this\n\nexternal-id\n00:00:00.500 --> 00:00:02.500 align:start\nFirst line\nSecond line\n"
+        imported (nle/import-webvtt base source "en")
+        english (first (filter #(= "en" (nle/caption-language %)) (:project/captions imported)))]
+    (is (= 15 (:caption/start-frame english)))
+    (is (= 75 (:caption/end-frame english)))
+    (is (= "First line\nSecond line" (:caption/text english)))
+    (is (= ["en" "ja"] (nle/caption-languages imported)))
+    (is (str/includes? (nle/webvtt imported "en") "00:00:00.500 --> 00:00:02.500"))
+    (is (str/includes? (nle/webvtt imported "ja") "残す"))
+    (is (empty? (nle/validate-project imported)))
+    (is (nil? (nle/import-webvtt base "WEBVTT\n\nbroken" "en")))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))

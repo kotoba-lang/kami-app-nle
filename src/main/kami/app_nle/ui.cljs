@@ -302,6 +302,14 @@
   (let [language (nle/normalize-language (get-in @state [:project :project/caption-language]))]
     (download-file! (js/Blob. #js [(nle/webvtt (:project @state) language)] #js {:type "text/vtt;charset=utf-8"})
                     (str "kami-nle-captions-" language ".vtt"))))
+(defn import-webvtt! [event]
+  (when-let [file (aget (.. event -target -files) 0)]
+    (-> (.text file)
+        (.then (fn [text]
+                 (if-let [project (nle/import-webvtt (:project @state) text (:caption-language @state))]
+                   (swap! state assoc :project project :project-error nil)
+                   (swap! state assoc :project-error "WebVTT import failed: invalid header, cue timing or text"))))
+        (.catch #(swap! state assoc :project-error (str "WebVTT import failed: " (.-message %)))))))
 (defn export-package! []
   (let [project (:project @state) asset-ids (sort (keys (:project/assets project)))
         missing (vec (remove #(get-in @state [:assets % :blob]) asset-ids))
@@ -814,6 +822,9 @@
                                                            (max 1 (js/parseInt (.. % -target -value))))}]]
     [:label "New caption language" [:input {:value (:caption-language @state) :aria-label "New caption language"
                                                :on-change #(swap! state assoc :caption-language (.. % -target -value))}]]
+    [:label.import "Import WebVTT for language"
+     [:input {:type "file" :accept ".vtt,text/vtt" :aria-label "Import WebVTT"
+              :on-change import-webvtt!}]]
     [:label "Burn-in / export language"
      [:select {:value (nle/normalize-language (:project/caption-language project))
                :aria-label "Active caption language"
