@@ -71,6 +71,13 @@
     (is (empty? (nle/missing-asset-ids registered ["asset:7"])))
     (is (= registered (nle/recover-project (nle/recovery-envelope registered))))
     (is (= "asset:0" (nle/next-asset-id registered)))))
+(deftest content-addressed-media-cache-policy
+  (let [registered (-> p (nle/register-asset "asset:7" "scene.webm" "def456")
+                       (nle/register-asset "asset:8" "legacy.mov"))]
+    (is (= [{:asset/id "asset:7" :asset/name "scene.webm" :asset/sha256 "def456"}]
+           (nle/cache-requests registered)))
+    (is (nle/accept-cache-hit registered "asset:7" "def456"))
+    (is (not (nle/accept-cache-hit registered "asset:7" "tampered")))))
 (deftest bounded-project-undo-redo
   (let [p2 (assoc p :project/export-profile :master) history (nle/record-history nle/empty-history p)
         undone (nle/undo-project p2 history) redone (nle/redo-project (:project undone) (:history undone))]
