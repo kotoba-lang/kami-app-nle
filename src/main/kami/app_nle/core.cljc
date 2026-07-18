@@ -139,6 +139,40 @@
         ms (mod millis 1000) seconds-total (quot millis 1000) seconds (mod seconds-total 60)
         minutes-total (quot seconds-total 60) minutes (mod minutes-total 60) hours (quot minutes-total 60)]
     (str (pad2 hours) ":" (pad2 minutes) ":" (pad2 seconds) "." (pad3 ms))))
+(defn- parse-int [value] #?(:clj (Long/parseLong value) :cljs (js/parseInt value 10)))
+(defn vtt-time->frame [timecode fps]
+  (when-let [[_ hours minutes seconds millis] (re-matches #"^(\d+):(\d{2}):(\d{2})\.(\d{3})$" timecode)]
+    (let [total-ms (+ (* (parse-int hours) 3600000) (* (parse-int minutes) 60000)
+                      (* (parse-int seconds) 1000) (parse-int millis))]
+      (long #?(:clj (Math/round (double (* fps (/ total-ms 1000.0))))
+               :cljs (js/Math.round (* fps (/ total-ms 1000.0))))))))
+(defn parse-webvtt [text fps language]
+  (let [normalized (-> (str text) (str/replace "\r\n" "\n") (str/replace-first #"^\uFEFF" ""))
+        blocks (str/split normalized #"\n\s*\n")
+        header (some-> (first blocks) str/split-lines first str/trim)
+        cue-blocks (remove #(re-find #"^(NOTE|STYLE|REGION)(?:\s|$)" (str/trim %)) (rest blocks))]
+    (when (and (pos-int? fps) (boolean (re-find #"^WEBVTT(?:\s|$)" header)))
+      (let [cues
+            (map-indexed
+             (fn [index block]
+               (let [lines (str/split-lines block) timing-index (if (str/includes? (first lines) "-->") 0 1)
+                     timing (get lines timing-index) [start-token end-side] (when timing (str/split timing #"\s+-->\s+" 2))
+                     end-token (some-> end-side (str/split #"\s+" 2) first)
+                     start (when start-token (vtt-time->frame start-token fps)) end (when end-token (vtt-time->frame end-token fps))
+                     content (str/join "\n" (drop (inc timing-index) lines))]
+                 (when (and start end (< start end) (not (str/blank? content)))
+                   {:caption/id (str "vtt:" (normalize-language language) ":" index)
+                    :caption/start-frame start :caption/end-frame end :caption/text content
+                    :caption/language (normalize-language language) :caption/style default-caption-style})))
+             cue-blocks)]
+        (when (and (seq cues) (every? some? cues)) (vec cues))))))
+(defn import-webvtt [p text language]
+  (when-let [cues (parse-webvtt text (:project/fps p) language)]
+    (let [language (normalize-language language)]
+      (-> p
+          (update :project/captions #(->> % (remove (fn [caption] (= language (caption-language caption)))) vec))
+          (update :project/captions #(->> (concat % cues) (sort-by (juxt :caption/start-frame :caption/id)) vec))
+          (assoc :project/caption-language language)))))
 (defn webvtt
   ([p] (webvtt p (normalize-language (:project/caption-language p))))
   ([p language]
