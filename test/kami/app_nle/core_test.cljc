@@ -211,6 +211,20 @@
     (is (empty? (nle/validate-project captions)))
     (is (= [[:invalid-caption "draft"]]
            (nle/validate-project (assoc-in captions [:project/captions 1 :caption/status] :rejected))))))
+(deftest imsc1-text-export-is-approved-localized-styled-and-escaped
+  (let [captions (-> p
+                     (nle/add-caption "approved" 0 60 "Ship & <go>\nNow" "en"
+                                      {:caption/position :top :caption/align :left :caption/font-scale 1.2})
+                     (nle/add-caption "draft" 60 90 "Do not ship" "en" nle/default-caption-style)
+                     (nle/set-caption-status "draft" :draft))
+        xml (nle/imsc1 captions "en")]
+    (is (str/includes? xml "ttp:contentProfiles=\"http://www.w3.org/ns/ttml/profile/imsc1.2/text\""))
+    (is (str/includes? xml "ttp:frameRate=\"30\""))
+    (is (str/includes? xml "region=\"top\" tts:textAlign=\"left\" tts:fontSize=\"120.0%\""))
+    (is (str/includes? xml "Ship &amp; &lt;go&gt;<br/>Now"))
+    (is (str/includes? xml "xml:id=\"cue-0-approved\""))
+    (is (not (str/includes? xml "Do not ship")))
+    (is (str/includes? xml "begin=\"00:00:00.000\" end=\"00:00:02.000\""))))
 (deftest caption-review-notes-and-status-history-are-auditable
   (let [captioned (nle/add-caption p "cue" 0 60 "Review me" "en" nle/default-caption-style)
         reviewed (-> captioned

@@ -302,6 +302,11 @@
   (let [language (nle/normalize-language (get-in @state [:project :project/caption-language]))]
     (download-file! (js/Blob. #js [(nle/webvtt (:project @state) language)] #js {:type "text/vtt;charset=utf-8"})
                     (str "kami-nle-captions-" language ".vtt"))))
+(defn export-imsc1! []
+  (let [language (nle/normalize-language (get-in @state [:project :project/caption-language]))]
+    (download-file! (js/Blob. #js [(nle/imsc1 (:project @state) language)]
+                                  #js {:type "application/ttml+xml;charset=utf-8"})
+                    (str "kami-nle-captions-" language ".imsc.xml"))))
 (defn import-webvtt! [event]
   (when-let [file (aget (.. event -target -files) 0)]
     (-> (.text file)
@@ -948,6 +953,7 @@
        [:button {:aria-label (str "Delete " (:caption/id caption))
                  :on-click #(swap! state update :project nle/remove-caption (:caption/id caption))} "Delete"]])
     [:button {:on-click export-webvtt! :disabled (empty? (:project/captions project))} "Export WebVTT"]
+    [:button {:on-click export-imsc1! :disabled (empty? (:project/captions project))} "Export IMSC1/TTML"]
     (when-let [clip (selected-clip project selected)]
       [:div.asset [:strong (str "Edit • " (:clip/name clip))]
        [:label "Source in" [:input {:type "number" :min 0 :value (:clip/in-frame clip) :on-change #(edit-trim! clip :in (js/parseInt (.. % -target -value)))}]]
