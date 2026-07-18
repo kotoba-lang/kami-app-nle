@@ -37,3 +37,19 @@
                   tracks))))
 (defn validate-project [p] (vec (concat (when-not (= schema (:project/schema p)) [:unsupported-schema]) (when-not (pos-int? (:project/fps p)) [:invalid-fps])
   (for [c (mapcat :track/clips (:project/tracks p)) :when (or (neg? (:clip/start-frame c)) (>= (:clip/in-frame c) (:clip/out-frame c)))] [:invalid-clip (:clip/id c)]))))
+
+(defn video-clips [p]
+  (->> (:project/tracks p) (filter #(= :video (:track/type %))) (mapcat :track/clips)
+       (filter :clip/source-id) (sort-by :clip/start-frame) vec))
+
+(defn clip-at-frame [p frame]
+  (last (filter (fn [clip] (<= (:clip/start-frame clip) frame (dec (clip-end clip)))) (video-clips p))))
+
+(defn render-segments [p]
+  (let [fps (:project/fps p)]
+    (mapv (fn [clip]
+            {:segment/clip-id (:clip/id clip) :segment/source-id (:clip/source-id clip)
+             :segment/timeline-start-sec (/ (:clip/start-frame clip) fps)
+             :segment/source-start-sec (/ (:clip/in-frame clip) fps)
+             :segment/duration-sec (/ (- (:clip/out-frame clip) (:clip/in-frame clip)) fps)})
+          (video-clips p))))
