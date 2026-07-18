@@ -21,6 +21,11 @@
   {:review {:profile/name "Review VP8" :profile/mime "video/webm;codecs=vp8,opus" :profile/video-bps 2000000 :profile/audio-bps 128000}
    :master {:profile/name "Master VP9" :profile/mime "video/webm;codecs=vp9,opus" :profile/video-bps 8000000 :profile/audio-bps 192000}
    :compact {:profile/name "Compact VP8" :profile/mime "video/webm;codecs=vp8,opus" :profile/video-bps 1000000 :profile/audio-bps 96000}})
+(def proxy-profile {:profile/name "Preview proxy" :profile/mime "video/webm;codecs=vp8,opus"
+                    :profile/max-width 640 :profile/max-height 360
+                    :profile/video-bps 800000 :profile/audio-bps 96000})
+(defn media-url-key [proxy-preview? exporting? asset]
+  (if (and proxy-preview? (not exporting?) (:proxy-url asset)) :proxy-url :url))
 (defn project [m] (merge {:project/schema schema :project/fps 30 :project/export-profile :review :project/assets {} :project/tracks []} m))
 (defn register-asset
   ([p asset-id name] (register-asset p asset-id name nil))

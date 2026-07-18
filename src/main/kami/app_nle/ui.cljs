@@ -7,7 +7,7 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
@@ -90,7 +90,14 @@
         (swap! state assoc :frame (js/Math.floor (* (.-currentTime v) (get-in @state [:project :project/fps])))
                :audio-meter-db (audio-meter-db)))
       (js/requestAnimationFrame draw-frame!))))
-(defn activate-source! [source-id source-frame] (when-let [{:keys [url]} (get-in @state [:assets source-id])] (let [video (primary-video)] (swap! state assoc :pending-source-frame source-frame :active-source source-id) (if (not= url (.-src video)) (do (set! (.-src video) url) (.load video)) (set! (.-currentTime video) (/ source-frame (get-in @state [:project :project/fps])))))))
+(defn active-asset-url [asset]
+  (get asset (nle/media-url-key (:proxy-preview? @state) (:exporting? @state) asset)))
+(defn activate-source! [source-id source-frame]
+  (when-let [asset (get-in @state [:assets source-id])]
+    (let [url (active-asset-url asset) video (primary-video)]
+      (swap! state assoc :pending-source-frame source-frame :active-source source-id)
+      (if (not= url (.-src video)) (do (set! (.-src video) url) (.load video))
+          (set! (.-currentTime video) (/ source-frame (get-in @state [:project :project/fps])))))))
 (defn seek-frame! [frame] (when-let [clip (nle/clip-at-frame (:project @state) frame)] (activate-source! (:clip/source-id clip) (+ (:clip/in-frame clip) (- frame (:clip/start-frame clip))))))
 (defn load-media! [e]
   (let [files (array-seq (.. e -target -files))]
@@ -108,6 +115,60 @@
                                           (cache-media! sha256 (.-name file) (.-type file) file))))))))
                 (js/Promise.resolve true) files)
         (.then #(when (seq files) (seek-frame! (:frame @state)))))))
+(defn proxy-recorder-options []
+  (let [preferred (:profile/mime nle/proxy-profile)
+        mime (if (.isTypeSupported js/MediaRecorder preferred) preferred "video/webm;codecs=vp8")]
+    #js {:mimeType mime :videoBitsPerSecond (:profile/video-bps nle/proxy-profile)
+         :audioBitsPerSecond (:profile/audio-bps nle/proxy-profile)}))
+(defn generate-proxy! [source-id]
+  (when-let [{:keys [url]} (get-in @state [:assets source-id])]
+    (swap! state assoc :proxy-generating source-id :proxy-error nil)
+    (let [video (.createElement js/document "video") canvas (.createElement js/document "canvas")
+          ctx (.getContext canvas "2d") chunks (array)]
+      (set! (.-playsInline video) true) (set! (.-muted video) true) (set! (.-preload video) "auto")
+      (set! (.-onerror video) #(swap! state assoc :proxy-generating nil :proxy-error (str "Cannot decode proxy source " source-id)))
+      (set! (.-onloadedmetadata video)
+            (fn []
+              (let [max-w (:profile/max-width nle/proxy-profile) max-h (:profile/max-height nle/proxy-profile)
+                    scale (min 1 (/ max-w (.-videoWidth video)) (/ max-h (.-videoHeight video)))
+                    width (max 2 (* 2 (js/Math.floor (/ (* scale (.-videoWidth video)) 2))))
+                    height (max 2 (* 2 (js/Math.floor (/ (* scale (.-videoHeight video)) 2))))]
+                (set! (.-width canvas) width) (set! (.-height canvas) height)
+                (let [canvas-stream (.captureStream canvas 30)
+                      source-stream (.captureStream video)
+                      _ (doseq [track (array-seq (.getAudioTracks source-stream))] (.addTrack canvas-stream track))
+                      recorder (js/MediaRecorder. canvas-stream (proxy-recorder-options))
+                      drawing? (atom true)
+                      started-ms (atom nil)
+                      draw! (fn draw! [] (when @drawing? (.drawImage ctx video 0 0 width height) (js/requestAnimationFrame draw!)))]
+                  (set! (.-ondataavailable recorder) #(when (pos? (.. % -data -size)) (.push chunks (.-data %))))
+                  (set! (.-onstop recorder)
+                        (fn []
+                          (reset! drawing? false)
+                          (doseq [track (array-seq (.getTracks canvas-stream))] (.stop track))
+                          (doseq [track (array-seq (.getTracks source-stream))] (.stop track))
+                          (let [blob (js/Blob. chunks #js {:type (.-mimeType recorder)})]
+                            (if (pos? (.-size blob))
+                              (let [proxy-url (js/URL.createObjectURL blob)]
+                                (when-let [old (get-in @state [:assets source-id :proxy-url])] (js/URL.revokeObjectURL old))
+                                (swap! state (fn [s] (-> s (assoc-in [:assets source-id :proxy-url] proxy-url)
+                                                          (assoc-in [:assets source-id :proxy-blob] blob)
+                                                          (assoc-in [:assets source-id :proxy-size] (.-size blob))
+                                                          (assoc :proxy-generating nil))))
+                                (seek-frame! (:frame @state)))
+                              (swap! state assoc :proxy-generating nil :proxy-error "Proxy encoder produced no media")))))
+                  (set! (.-onended video)
+                        #(let [elapsed (- (js/performance.now) @started-ms)
+                               target (+ 50 (* 1000 (.-duration video)))
+                               wait-ms (max 0 (- target elapsed))]
+                           (js/setTimeout (fn [] (when (= "recording" (.-state recorder)) (.stop recorder))) wait-ms)))
+                  (draw!) (reset! started-ms (js/performance.now)) (.start recorder 100)
+                  (-> (.play video) (.catch #(do (when (= "recording" (.-state recorder)) (.stop recorder))
+                                                  (swap! state assoc :proxy-generating nil :proxy-error (.-message %)))))))))
+      (set! (.-src video) url) (.load video))))
+(defn toggle-proxy-preview! [enabled?]
+  (swap! state assoc :proxy-preview? enabled? :decoded? false)
+  (seek-frame! (:frame @state)))
 (defn scan-video-directory! [event]
   (let [files (->> (array-seq (.. event -target -files))
                    (filter #(.startsWith (or (.-type %) "") "video/")) vec)]
@@ -216,7 +277,7 @@
                      (.then (fn [values] {:project (:project accepted) :items (array-seq values)})))))))
           (.then
            (fn [{:keys [project items]}]
-             (doseq [[_ asset] (:assets @state)] (when-let [url (:url asset)] (js/URL.revokeObjectURL url)))
+             (doseq [[_ asset] (:assets @state) k [:url :proxy-url]] (when-let [url (get asset k)] (js/URL.revokeObjectURL url)))
              (let [first-clip (first (nle/video-clips project))
                    assets (into {} (map (fn [{:keys [asset-id descriptor blob]}]
                                           [asset-id {:name (:media/name descriptor) :type (:media/type descriptor)
@@ -236,7 +297,7 @@
                  (try
                    (if-let [project (nle/accept-project (reader/read-string text))]
                      (let [first-clip (first (nle/video-clips project))]
-                       (doseq [[_ asset] (:assets @state)] (when-let [url (:url asset)] (js/URL.revokeObjectURL url)))
+                       (doseq [[_ asset] (:assets @state) k [:url :proxy-url]] (when-let [url (get asset k)] (js/URL.revokeObjectURL url)))
                        (swap! state assoc :project project :selected (:clip/id first-clip)
                               :frame (or (:clip/start-frame first-clip) 0) :decoded? false :playing? false :project-error nil :assets {}))
                      (swap! state assoc :project-error "Unsupported or invalid NLE project"))
@@ -449,7 +510,18 @@
   [:section.workspace [:aside [:h2 "Project bin"] [:label.import "Import / relink V1 videos" [:input {:type "file" :accept "video/*" :multiple true :aria-label "Import or relink NLE videos" :on-change load-media!}]]
     [:label.import "Search video directory" [:input {:type "file" :accept "video/*" :multiple true :webkitdirectory ""
                                                        :aria-label "Search NLE video directory" :on-change scan-video-directory!}]]
-    (if (seq assets) (for [[id asset] assets] ^{:key id} [:div.asset (str "🎞 " id " • " (:name asset))]) [:div.asset "No media loaded"]) [:label "Effect" [:select {:value (name effect) :on-change #(swap! state assoc :effect (keyword (.. % -target -value)))} [:option {:value "none"} "None"] [:option {:value "cinema"} "Cinema"] [:option {:value "mono"} "Monochrome"] [:option {:value "dream"} "Dream"]]]
+    (if (seq assets)
+      (for [[id asset] assets] ^{:key id}
+        [:div.asset [:span (str "🎞 " id " • " (:name asset)
+                                (when (:proxy-url asset) (str " • proxy " (js/Math.round (/ (:proxy-size asset) 1024)) " KiB")))]
+         [:button {:aria-label (str "Generate proxy for " id) :disabled (= id (:proxy-generating @state))
+                   :on-click #(generate-proxy! id)}
+          (if (= id (:proxy-generating @state)) "Generating…" (if (:proxy-url asset) "Regenerate proxy" "Generate proxy"))]])
+      [:div.asset "No media loaded"])
+    [:label "Use proxies for preview" [:input {:type "checkbox" :checked (:proxy-preview? @state)
+                                                 :aria-label "Use proxies for preview"
+                                                 :on-change #(toggle-proxy-preview! (.. % -target -checked))}]]
+    [:label "Effect" [:select {:value (name effect) :on-change #(swap! state assoc :effect (keyword (.. % -target -value)))} [:option {:value "none"} "None"] [:option {:value "cinema"} "Cinema"] [:option {:value "mono"} "Monochrome"] [:option {:value "dream"} "Dream"]]]
     (when-let [clip (selected-clip project selected)]
       [:div.asset [:strong (str "Edit • " (:clip/name clip))]
        [:label "Source in" [:input {:type "number" :min 0 :value (:clip/in-frame clip) :on-change #(edit-trim! clip :in (js/parseInt (.. % -target -value)))}]]
@@ -479,6 +551,8 @@
     [:button {:on-click #(js/navigator.clipboard.writeText (pr-str project))} "Copy project EDN"]]
    (when-let [error (:project-error @state)] [:aside [:strong (str "Project error: " error)]])
    (when (:directory-searching? @state) [:aside [:strong "Searching video directory…"]])
+   (when-let [source-id (:proxy-generating @state)] [:aside [:strong (str "Generating preview proxy for " source-id "…")]])
+   (when-let [error (:proxy-error @state)] [:aside [:strong (str "Proxy error: " error)]])
    (when-let [{:keys [matched missing ignored]} (:directory-result @state)]
      [:aside [:strong (str "Directory relink: " matched " matched • " (count missing) " missing • " ignored " ignored")]])
    (when (:recovered? @state) [:aside [:strong "Recovered autosaved project"]])
