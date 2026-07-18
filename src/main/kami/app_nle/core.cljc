@@ -305,6 +305,18 @@
                       (* (parse-int seconds) 1000) (parse-int millis))]
       (long #?(:clj (Math/round (double (* fps (/ total-ms 1000.0))))
                :cljs (js/Math.round (* fps (/ total-ms 1000.0))))))))
+(defn- parse-decimal [value] #?(:clj (Double/parseDouble value) :cljs (js/parseFloat value)))
+(defn imsc-time->frame [time-expression fps]
+  (or (vtt-time->frame time-expression fps)
+      (when-let [[_ seconds] (re-matches #"^(\d+(?:\.\d+)?)s$" (or time-expression ""))]
+        (long #?(:clj (Math/round (double (* fps (parse-decimal seconds))))
+                 :cljs (js/Math.round (* fps (parse-decimal seconds))))))
+      (when-let [[_ hours minutes seconds frames]
+                 (re-matches #"^(\d+):(\d{2}):(\d{2}):(\d{2})$" (or time-expression ""))]
+        (let [frame (parse-int frames)]
+          (when (< frame fps)
+            (+ (* (parse-int hours) 3600 fps) (* (parse-int minutes) 60 fps)
+               (* (parse-int seconds) fps) frame))))))
 (defn parse-webvtt [text fps language]
   (let [normalized (-> (str text) (str/replace "\r\n" "\n") (str/replace-first #"^\uFEFF" ""))
         blocks (str/split normalized #"\n\s*\n")
@@ -329,10 +341,14 @@
 (defn import-webvtt [p text language]
   (when-let [cues (parse-webvtt text (:project/fps p) language)]
     (let [language (normalize-language language)]
-      (-> p
-          (update :project/captions #(->> % (remove (fn [caption] (= language (caption-language caption)))) vec))
-          (update :project/captions #(->> (concat % cues) (sort-by (juxt :caption/start-frame :caption/id)) vec))
-          (assoc :project/caption-language language)))))
+      (let [removed-ids (set (map :caption/id (filter #(= language (caption-language %)) (:project/captions p))))]
+        (-> p
+            (update :project/captions #(->> % (remove (fn [caption] (= language (caption-language caption)))) vec))
+            (update :project/captions #(->> (concat % cues) (sort-by (juxt :caption/start-frame :caption/id)) vec))
+            (update :project/review-notifications
+                    #(vec (remove (fn [notification]
+                                    (contains? removed-ids (:notification/caption-id notification))) %)))
+            (assoc :project/caption-language language))))))
 (defn webvtt
   ([p] (webvtt p (normalize-language (:project/caption-language p))))
   ([p language]
@@ -380,6 +396,30 @@
                                   "\" tts:fontSize=\"" (* 100 (:caption/font-scale style)) "%\">"
                                   (imsc-text (:caption/text caption)) "</p>"))) cues))
           (when (seq cues) "\n") "  </div></body>\n</tt>\n"))))
+(defn import-imsc-cues [p requested-language cues]
+  (let [language (normalize-language requested-language)]
+    (when (and (= requested-language language) (seq cues)
+               (every? (fn [cue]
+                         (and (number? (:caption/start-frame cue)) (not (neg? (:caption/start-frame cue)))
+                              (number? (:caption/end-frame cue))
+                              (< (:caption/start-frame cue) (:caption/end-frame cue))
+                              (string? (:caption/text cue)) (not (str/blank? (:caption/text cue))))) cues))
+      (let [removed-ids (set (map :caption/id (filter #(= language (caption-language %)) (:project/captions p))))
+            imported (map-indexed
+                      (fn [index cue]
+                        {:caption/id (str "imsc:" language ":" index)
+                         :caption/start-frame (long (:caption/start-frame cue))
+                         :caption/end-frame (long (:caption/end-frame cue))
+                         :caption/text (:caption/text cue) :caption/language language
+                         :caption/status :draft :caption/review-notes [] :caption/status-history []
+                         :caption/style (normalize-caption-style (:caption/style cue))}) cues)]
+        (-> p
+            (update :project/captions #(->> % (remove (fn [caption] (= language (caption-language caption)))) vec))
+            (update :project/captions #(->> (concat % imported) (sort-by (juxt :caption/start-frame :caption/id)) vec))
+            (update :project/review-notifications
+                    #(vec (remove (fn [notification]
+                                    (contains? removed-ids (:notification/caption-id notification))) %)))
+            (assoc :project/caption-language language))))))
 (defn register-asset
   ([p asset-id name] (register-asset p asset-id name nil))
   ([p asset-id name sha256]

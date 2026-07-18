@@ -225,6 +225,29 @@
     (is (str/includes? xml "xml:id=\"cue-0-approved\""))
     (is (not (str/includes? xml "Do not ship")))
     (is (str/includes? xml "begin=\"00:00:00.000\" end=\"00:00:02.000\""))))
+(deftest normalized-imsc-import-replaces-language-as-draft-and-cascades-review-state
+  (let [existing (-> p
+                     (nle/add-caption "old" 0 30 "Old" "en" nle/default-caption-style)
+                     (nle/start-caption-review-thread "old" "thread" "editor" "Check @lead" 1000))
+        imported (nle/import-imsc-cues existing "en"
+                                       [{:caption/start-frame 15 :caption/end-frame 75
+                                         :caption/text "Imported\ncaption"
+                                         :caption/style {:caption/position :top :caption/align :left
+                                                         :caption/font-scale 1.2}}])
+        cue (first (:project/captions imported))]
+    (is (= "imsc:en:0" (:caption/id cue)))
+    (is (= :draft (nle/caption-status cue)))
+    (is (= "Imported\ncaption" (:caption/text cue)))
+    (is (= {:caption/position :top :caption/align :left :caption/font-scale 1.2} (:caption/style cue)))
+    (is (empty? (:project/review-notifications imported)))
+    (is (empty? (nle/validate-project imported)))
+    (is (nil? (nle/import-imsc-cues existing "en" [{:caption/start-frame 20 :caption/end-frame 10
+                                                       :caption/text "bad"}])))))
+(deftest imsc-time-expressions-normalize-to-project-frames
+  (is (= 45 (nle/imsc-time->frame "1.5s" 30)))
+  (is (= 45 (nle/imsc-time->frame "00:00:01:15" 30)))
+  (is (= 45 (nle/imsc-time->frame "00:00:01.500" 30)))
+  (is (nil? (nle/imsc-time->frame "00:00:01:30" 30))))
 (deftest caption-review-notes-and-status-history-are-auditable
   (let [captioned (nle/add-caption p "cue" 0 60 "Review me" "en" nle/default-caption-style)
         reviewed (-> captioned
