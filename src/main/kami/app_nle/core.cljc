@@ -347,6 +347,39 @@
                                     (= (normalize-language language) (caption-language %))) (:project/captions p))))
        (when (seq (filter #(and (caption-deliverable? %)
                                 (= (normalize-language language) (caption-language %))) (:project/captions p))) "\n"))))
+(defn xml-escape [value]
+  (-> (str value) (str/replace "&" "&amp;") (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;") (str/replace "\"" "&quot;") (str/replace "'" "&apos;")))
+(defn- imsc-text [text]
+  (str/replace (xml-escape text) "\n" "<br/>"))
+(defn- xml-ncname [index value]
+  (str "cue-" index "-" (str/replace (str value) #"[^A-Za-z0-9_.-]" "-")))
+(defn imsc1
+  ([p] (imsc1 p (normalize-language (:project/caption-language p))))
+  ([p language]
+   (let [language (normalize-language language)
+         cues (filter #(and (caption-deliverable? %) (= language (caption-language %)))
+                      (:project/captions p))]
+     (str "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+          "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:tts=\"http://www.w3.org/ns/ttml#styling\" "
+          "xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" xml:lang=\"" (xml-escape language)
+          "\" ttp:timeBase=\"media\" ttp:frameRate=\"" (:project/fps p)
+          "\" ttp:contentProfiles=\"http://www.w3.org/ns/ttml/profile/imsc1.2/text\">\n"
+          "  <head><layout>"
+          "<region xml:id=\"top\" tts:origin=\"10% 8%\" tts:extent=\"80% 38%\"/>"
+          "<region xml:id=\"bottom\" tts:origin=\"10% 62%\" tts:extent=\"80% 30%\"/>"
+          "</layout></head>\n  <body><div>\n"
+          (str/join "\n"
+                    (map-indexed (fn [index caption]
+                           (let [style (normalize-caption-style (:caption/style caption))]
+                             (str "    <p xml:id=\"" (xml-ncname index (:caption/id caption))
+                                  "\" begin=\"" (frame->vtt-time (:caption/start-frame caption) (:project/fps p))
+                                  "\" end=\"" (frame->vtt-time (:caption/end-frame caption) (:project/fps p))
+                                  "\" region=\"" (name (:caption/position style))
+                                  "\" tts:textAlign=\"" (name (:caption/align style))
+                                  "\" tts:fontSize=\"" (* 100 (:caption/font-scale style)) "%\">"
+                                  (imsc-text (:caption/text caption)) "</p>"))) cues))
+          (when (seq cues) "\n") "  </div></body>\n</tt>\n"))))
 (defn register-asset
   ([p asset-id name] (register-asset p asset-id name nil))
   ([p asset-id name sha256]
