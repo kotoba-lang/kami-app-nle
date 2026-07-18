@@ -258,6 +258,30 @@
             {:resolution/resolved? false :resolution/actor "lead" :resolution/at 1300}]
            (:review/resolution-history root)))
     (is (empty? (nle/validate-project reopened)))))
+(deftest review-mentions-and-assignments-create-auditable-unread-notifications
+  (let [base (-> (nle/add-caption p "cue" 0 60 "Review" "en" nle/default-caption-style)
+                 (nle/set-caption-reviewer "cue" "mika")
+                 (nle/start-caption-review-thread "cue" "thread-1" "editor" "Please check @lead" 1000))
+        replied (nle/reply-caption-review-thread base "cue" "thread-1" "reply-1" "ken" "Done @qa" 1100)
+        lead-note (first (nle/unread-review-notifications-for replied "lead"))
+        read (nle/mark-review-notification-read replied (:notification/id lead-note) "lead" 1200)
+        lead-index (first (keep-indexed #(when (= (:notification/id lead-note) (:notification/id %2)) %1)
+                                        (:project/review-notifications read)))]
+    (is (= ["lead" "mika"]
+           (sort (map :notification/recipient (:project/review-notifications base)))))
+    (is (= [:mention] (mapv :notification/kind (nle/review-notifications-for base "lead"))))
+    (is (= [:review-request] (mapv :notification/kind (nle/review-notifications-for base "mika"))))
+    (is (= ["editor" "qa"]
+           (sort (map :notification/recipient
+                      (drop 2 (:project/review-notifications replied))))))
+    (is (= [:thread-reply]
+           (mapv :notification/kind (nle/review-notifications-for replied "editor"))))
+    (is (empty? (nle/unread-review-notifications-for read "lead")))
+    (is (= replied (nle/mark-review-notification-read replied (:notification/id lead-note) "other" 1200)))
+    (is (empty? (:project/review-notifications (nle/remove-caption replied "cue"))))
+    (is (empty? (nle/validate-project read)))
+    (is (= [[:invalid-review-notification (:notification/id lead-note)]]
+           (nle/validate-project (assoc-in read [:project/review-notifications lead-index :notification/read-at] 999))))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))
