@@ -315,6 +315,51 @@
                    (swap! state assoc :project project :project-error nil)
                    (swap! state assoc :project-error "WebVTT import failed: invalid header, cue timing or text"))))
         (.catch #(swap! state assoc :project-error (str "WebVTT import failed: " (.-message %)))))))
+(def ttml-namespace "http://www.w3.org/ns/ttml")
+(def ttml-parameter-namespace "http://www.w3.org/ns/ttml#parameter")
+(def ttml-styling-namespace "http://www.w3.org/ns/ttml#styling")
+(defn imsc-node-text [node]
+  (apply str
+         (map (fn [child]
+                (cond (= 3 (.-nodeType child)) (.-nodeValue child)
+                      (= 4 (.-nodeType child)) (.-nodeValue child)
+                      (= "br" (.-localName child)) "\n"
+                      :else (imsc-node-text child)))
+              (array-seq (.-childNodes node)))))
+(defn parse-imsc-document [text fps]
+  (when (and (string? text) (not (re-find #"(?i)<!DOCTYPE" text)))
+    (let [document (.parseFromString (js/DOMParser.) text "application/xml")
+          root (.-documentElement document)
+          profile (.getAttributeNS root ttml-parameter-namespace "contentProfiles")
+          language (or (.getAttribute root "xml:lang") "en")
+          nodes (array-seq (.getElementsByTagNameNS document ttml-namespace "p"))]
+      (when (and (zero? (.-length (.querySelectorAll document "parsererror")))
+                 (= "tt" (.-localName root)) (= ttml-namespace (.-namespaceURI root))
+                 (str/includes? (or profile "") "http://www.w3.org/ns/ttml/profile/imsc1.2/text")
+                 (seq nodes))
+        (let [cues (mapv (fn [node]
+                           (let [start (nle/imsc-time->frame (.getAttribute node "begin") fps)
+                                 end (nle/imsc-time->frame (.getAttribute node "end") fps)
+                                 region (.getAttribute node "region")
+                                 align (.getAttributeNS node ttml-styling-namespace "textAlign")
+                                 font-size (.getAttributeNS node ttml-styling-namespace "fontSize")]
+                             {:caption/start-frame start :caption/end-frame end
+                              :caption/text (str/trim (imsc-node-text node))
+                              :caption/style {:caption/position (keyword (if (= region "top") "top" "bottom"))
+                                              :caption/align (keyword (if (#{"left" "center" "right"} align) align "center"))
+                                              :caption/font-scale (if (and font-size (str/ends-with? font-size "%"))
+                                                                    (/ (js/parseFloat font-size) 100) 1.0)}})) nodes)]
+          {:language language :cues cues})))))
+(defn import-imsc1! [event]
+  (when-let [file (aget (.. event -target -files) 0)]
+    (-> (.text file)
+        (.then (fn [text]
+                 (if-let [{:keys [language cues]} (parse-imsc-document text (get-in @state [:project :project/fps]))]
+                   (if-let [project (nle/import-imsc-cues (:project @state) language cues)]
+                     (swap! state assoc :project project :caption-language language :project-error nil)
+                     (swap! state assoc :project-error "IMSC import failed: invalid cue timing or text"))
+                   (swap! state assoc :project-error "IMSC import failed: require safe IMSC 1.2 Text Profile XML"))))
+        (.catch #(swap! state assoc :project-error (str "IMSC import failed: " (.-message %)))))))
 (defn export-package! []
   (let [project (:project @state) asset-ids (sort (keys (:project/assets project)))
         missing (vec (remove #(get-in @state [:assets % :blob]) asset-ids))
@@ -844,6 +889,9 @@
     [:label.import "Import WebVTT for language"
      [:input {:type "file" :accept ".vtt,text/vtt" :aria-label "Import WebVTT"
               :on-change import-webvtt!}]]
+    [:label.import "Import IMSC 1.2 captions"
+     [:input {:type "file" :accept ".xml,.ttml,application/ttml+xml" :aria-label "Import IMSC1/TTML"
+              :on-change import-imsc1!}]]
     [:button {:on-click #(swap! state update :project nle/clone-caption-language
                                 (nle/normalize-language (:project/caption-language project))
                                 (:caption-language @state))
