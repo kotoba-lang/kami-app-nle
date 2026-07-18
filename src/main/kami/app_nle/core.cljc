@@ -33,6 +33,14 @@
       (asset-id-by-name p name)))
 (defn missing-asset-ids [p loaded-ids]
   (->> (keys (:project/assets p)) (remove (set loaded-ids)) sort vec))
+(defn cache-requests [p]
+  (->> (:project/assets p)
+       (keep (fn [[asset-id asset]]
+               (when-let [sha256 (:asset/sha256 asset)]
+                 {:asset/id asset-id :asset/name (:asset/name asset) :asset/sha256 sha256})))
+       (sort-by :asset/id) vec))
+(defn accept-cache-hit [p asset-id sha256]
+  (= sha256 (get-in p [:project/assets asset-id :asset/sha256])))
 (defn next-asset-id [p]
   (loop [index 0]
     (let [asset-id (str "asset:" index)]

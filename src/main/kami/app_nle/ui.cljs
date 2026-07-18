@@ -1,16 +1,18 @@
 (ns kami.app-nle.ui
   (:require [reagent.core :as r] [reagent.dom.client :as rdom] [cljs.reader :as reader] [kami.app-nle.core :as nle]
+            [kami.app-nle.cache :as cache]
             ["fflate" :refer [zipSync unzipSync strToU8 strFromU8]]))
 
 (def sample (nle/project {:project/id "demo-cut" :project/name "海辺の予告編" :project/fps 30
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :cache-restoring? false :cache-restored-count 0 :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
 (defonce shortcuts-installed? (atom false))
+(defonce cache-restore-started? (atom false))
 (def recovery-key "kami-app-nle/recovery/v1")
 (defn sha256-file! [file]
   (-> (.arrayBuffer file)
@@ -18,6 +20,46 @@
       (.then (fn [digest]
                (apply str (map #(.padStart (.toString % 16) 2 "0")
                                (array-seq (js/Uint8Array. digest))))))))
+(defn cache-media! [sha256 name type blob]
+  (-> (cache/put! {:sha256 sha256 :name name :type type :blob blob})
+      (.catch #(js/console.warn "NLE media cache write failed" %))))
+(defn clear-media-cache! []
+  (-> (cache/clear!)
+      (.then #(swap! state assoc :cache-restored-count 0))
+      (.catch #(swap! state assoc :project-error (str "Media cache clear failed: " (.-message %))))))
+(declare seek-frame!)
+(defn restore-cached-media! []
+  (when-not @cache-restore-started?
+    (reset! cache-restore-started? true)
+    (let [requests (nle/cache-requests (:project @state))]
+      (swap! state assoc :cache-restoring? (boolean (seq requests)) :cache-restored-count 0)
+      (-> (.all js/Promise
+                (clj->js
+                 (map (fn [{:asset/keys [id name sha256]}]
+                        (-> (cache/get! sha256)
+                            (.then (fn [record]
+                                     (when record
+                                       (let [blob (.-blob record)]
+                                         (-> (sha256-file! blob)
+                                             (.then (fn [actual]
+                                                      (if (and (= sha256 actual)
+                                                               (nle/accept-cache-hit (:project @state) id actual))
+                                                        {:asset-id id :name name :type (or (.-type record) (.-type blob))
+                                                         :sha256 actual :blob blob}
+                                                        (-> (cache/delete! sha256) (.then (fn [_] nil)))))))))))
+                            (.catch (fn [error] (js/console.warn "NLE media cache read failed" error) nil))))
+                      requests)))
+          (.then (fn [values]
+                   (let [hits (vec (keep identity (array-seq values)))
+                         assets (into {} (map (fn [{:keys [asset-id name type sha256 blob]}]
+                                                [asset-id {:name name :type type :sha256 sha256 :blob blob
+                                                           :url (js/URL.createObjectURL blob)}]) hits))]
+                     (swap! state update :assets merge assets)
+                     (swap! state assoc :cache-restoring? false :cache-restored-count (count hits))
+                     (when (seq hits) (js/setTimeout #(seek-frame! (:frame @state)) 0)))))
+          (.catch (fn [error]
+                    (js/console.warn "NLE media cache restore failed" error)
+                    (swap! state assoc :cache-restoring? false)))))))
 (def filters {:none "none" :cinema "contrast(1.18) saturate(1.22)" :mono "grayscale(1) contrast(1.12)" :dream "saturate(1.35) brightness(1.08) blur(1px)"})
 (defn primary-video [] (if (= :a (:primary-slot @state)) @video-a-node @video-b-node))
 (defn secondary-video [] (if (= :a (:primary-slot @state)) @video-b-node @video-a-node))
@@ -62,7 +104,8 @@
                                               url (js/URL.createObjectURL file)]
                                           (when-let [old-url (get-in @state [:assets source-id :url])] (js/URL.revokeObjectURL old-url))
                                           (swap! state (fn [s] (-> s (assoc-in [:assets source-id] {:name (.-name file) :type (.-type file) :sha256 sha256 :blob file :url url})
-                                                                    (update :project nle/register-asset source-id (.-name file) sha256)))))))))))
+                                                                    (update :project nle/register-asset source-id (.-name file) sha256))))
+                                          (cache-media! sha256 (.-name file) (.-type file) file))))))))
                 (js/Promise.resolve true) files)
         (.then #(when (seq files) (seek-frame! (:frame @state)))))))
 (defn media-ready! [] (let [v (primary-video) c @canvas-node] (set! (.-width c) (or (.-videoWidth v) 1280)) (set! (.-height c) (or (.-videoHeight v) 720)) (set! (.-currentTime v) (/ (:pending-source-frame @state) (get-in @state [:project :project/fps]))) (swap! state assoc :decoded? true) (draw-frame!)))
@@ -153,6 +196,8 @@
                                           [asset-id {:name (:media/name descriptor) :type (:media/type descriptor)
                                                      :sha256 (:media/sha256 descriptor) :blob blob
                                                      :url (js/URL.createObjectURL blob)}]) items))]
+               (doseq [{:keys [descriptor blob]} items]
+                 (cache-media! (:media/sha256 descriptor) (:media/name descriptor) (:media/type descriptor) blob))
                (swap! state assoc :project project :selected (:clip/id first-clip)
                       :frame (or (:clip/start-frame first-clip) 0) :decoded? false :playing? false
                       :project-error nil :assets assets)
@@ -399,11 +444,15 @@
     [:label "Open project EDN" [:input {:type "file" :accept ".edn,application/edn" :aria-label "Open NLE project EDN" :on-change load-project!}]]
     [:button {:on-click export-package!} "Package project + media"]
     [:label "Open media package" [:input {:type "file" :accept ".zip,.kami.zip,application/zip" :aria-label "Open NLE media package" :on-change open-package!}]]
+    [:button {:on-click clear-media-cache! :aria-label "Clear persistent media cache"} "Clear media cache"]
     [:button {:on-click undo! :disabled (empty? (get-in @state [:history :history/past])) :aria-label "Undo project edit"} "↶ Undo"]
     [:button {:on-click redo! :disabled (empty? (get-in @state [:history :history/future])) :aria-label "Redo project edit"} "↷ Redo"]
     [:button {:on-click #(js/navigator.clipboard.writeText (pr-str project))} "Copy project EDN"]]
    (when-let [error (:project-error @state)] [:aside [:strong (str "Project error: " error)]])
    (when (:recovered? @state) [:aside [:strong "Recovered autosaved project"]])
+   (when (:cache-restoring? @state) [:aside [:strong "Restoring verified media cache…"]])
+   (when (pos? (:cache-restored-count @state))
+     [:aside [:strong (str "Restored " (:cache-restored-count @state) " verified cached media")]])
    (when (seq missing) [:aside.missing-media [:strong (str "Missing media: " (count missing))] [:span (pr-str missing)]])
    [:div.monitor [:video {:ref #(reset! video-a-node %) :style {:display "none"} :plays-inline true :on-loaded-metadata media-ready! :on-pause #(swap! state assoc :playing? false)}]
     [:video {:ref #(reset! video-b-node %) :style {:display "none"} :plays-inline true}]
@@ -411,4 +460,9 @@
   [:section.timeline [:input.scrub {:type "range" :min 0 :max total :value frame :aria-label "Playhead" :on-change #(let [f (js/parseInt (.. % -target -value))] (swap! state assoc :frame f) (seek-frame! f))}] (for [track (:project/tracks project)] ^{:key (:track/id track)} [:div.track [:div.track-name (:track/name track)] [:div.lane (for [c (:track/clips track)] ^{:key (:clip/id c)} [clip-view c total])]])]
   [:footer (if-let [e (seq (nle/validate-project project))] (str "Errors: " e) "HTMLVideo decode • canvas effects • MediaRecorder WebM export")]]))
 (defonce root-node (atom nil))
-(defn init! [] (when-not @root-node (restore-recovery!) (install-history!) (install-autosave!) (install-shortcuts!) (reset! root-node (rdom/create-root (.getElementById js/document "app")))) (rdom/render @root-node [app]))
+(defn init! []
+  (when-not @root-node
+    (restore-recovery!) (install-history!) (install-autosave!) (install-shortcuts!)
+    (reset! root-node (rdom/create-root (.getElementById js/document "app"))))
+  (rdom/render @root-node [app])
+  (restore-cached-media!))
