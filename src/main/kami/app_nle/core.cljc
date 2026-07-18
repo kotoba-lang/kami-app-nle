@@ -9,10 +9,24 @@
 (defn move-clip [p id frame] (update-clip p id #(assoc % :clip/start-frame (max 0 frame))))
 (defn trim-clip [p id in-frame out-frame] (if (< in-frame out-frame) (update-clip p id #(assoc % :clip/in-frame in-frame :clip/out-frame out-frame)) p))
 (defn split-clip [p id frame new-id]
-  (update p :project/tracks (fn [tracks] (mapv (fn [t] (update t :track/clips (fn [clips]
-    (vec (mapcat (fn [c] (let [offset (- frame (:clip/start-frame c)) duration (- (:clip/out-frame c) (:clip/in-frame c))]
-      (if (and (= id (:clip/id c)) (pos? offset) (< offset duration))
-        [(assoc c :clip/out-frame (+ (:clip/in-frame c) offset))
-         (assoc c :clip/id new-id :clip/name (str (:clip/name c) " B") :clip/start-frame frame :clip/in-frame (+ (:clip/in-frame c) offset))] [c]))) clips)))) tracks))))
+  (update p :project/tracks
+          (fn [tracks]
+            (mapv (fn [track]
+                    (update track :track/clips
+                            (fn [clips]
+                              (vec
+                               (mapcat
+                                (fn [clip]
+                                  (let [offset (- frame (:clip/start-frame clip))
+                                        duration (- (:clip/out-frame clip) (:clip/in-frame clip))]
+                                    (if (and (= id (:clip/id clip)) (pos? offset) (< offset duration))
+                                      [(assoc clip :clip/out-frame (+ (:clip/in-frame clip) offset))
+                                       (assoc clip :clip/id new-id
+                                                   :clip/name (str (:clip/name clip) " B")
+                                                   :clip/start-frame frame
+                                                   :clip/in-frame (+ (:clip/in-frame clip) offset))]
+                                      [clip])))
+                                clips)))))
+                  tracks))))
 (defn validate-project [p] (vec (concat (when-not (= schema (:project/schema p)) [:unsupported-schema]) (when-not (pos-int? (:project/fps p)) [:invalid-fps])
   (for [c (mapcat :track/clips (:project/tracks p)) :when (or (neg? (:clip/start-frame c)) (>= (:clip/in-frame c) (:clip/out-frame c)))] [:invalid-clip (:clip/id c)]))))
