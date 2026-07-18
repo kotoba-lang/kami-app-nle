@@ -120,6 +120,39 @@
 (defn caption-deliverable? [caption] (= :approved (caption-status caption)))
 (defn normalize-language [language] (if (and (string? language) (re-matches language-pattern language)) language "en"))
 (defn caption-language [caption] (normalize-language (:caption/language caption)))
+(def kinsoku-line-start (set "、。，．）］｝〉》」』】〕〗〙〛！？：；ーぁぃぅぇぉっゃゅょァィゥェォッャュョヮヵヶ"))
+(def kinsoku-line-end (set "（［｛〈《「『【〔〖〘〚"))
+(defn- wrap-cjk-line [text limit]
+  (loop [remaining (seq text) current [] lines []]
+    (if-let [character (first remaining)]
+      (if (< (count current) limit)
+        (recur (next remaining) (conj current character) lines)
+        (cond
+          (contains? kinsoku-line-start character)
+          (recur (next remaining) (conj current character) lines)
+
+          (and (> (count current) 1) (contains? kinsoku-line-end (peek current)))
+          (recur remaining [(peek current)] (conj lines (apply str (pop current))))
+
+          :else (recur (next remaining) [character] (conj lines (apply str current)))))
+      (cond-> lines (seq current) (conj (apply str current))))))
+(defn- wrap-word-line [text limit]
+  (let [words (->> (str/split (str/trim text) #"\s+")
+                   (mapcat #(if (> (count %) limit) (map (partial apply str) (partition-all limit %)) [%])))]
+    (if (empty? words) [""]
+        (loop [remaining words current "" lines []]
+          (if-let [word (first remaining)]
+            (let [candidate (if (str/blank? current) word (str current " " word))]
+              (if (<= (count candidate) limit)
+                (recur (rest remaining) candidate lines)
+                (recur (rest remaining) word (conj lines current))))
+            (cond-> lines (not (str/blank? current)) (conj current)))))))
+(defn caption-line-breaks [text language max-units]
+  (let [limit (long (clamp 4 80 (or max-units 32)))
+        cjk? (boolean (re-find #"^(?i:ja|zh)(?:-|$)" (normalize-language language)))]
+    (->> (str/split (or text "") #"\r?\n")
+         (mapcat #(if cjk? (wrap-cjk-line % limit) (wrap-word-line % limit)))
+         vec)))
 (defn caption-languages [p] (->> (:project/captions p) (map caption-language) set sort vec))
 (defn set-caption-language [p language]
   (if (and (string? language) (re-matches language-pattern language))

@@ -177,6 +177,14 @@
            (get-in project [:project/captions 0 :caption/style :caption/ruby-runs])))
     (is (str/includes? xml "この<span tts:ruby=\"container\"><span tts:ruby=\"base\">漢字</span><span tts:ruby=\"text\">かんじ</span></span>です"))
     (is (empty? (nle/validate-project project)))))
+(deftest caption-line-breaking-is-language-aware-and-kinsoku-safe
+  (let [japanese (nle/caption-line-breaks "「成熟度」を、さらに向上します。" "ja" 6)
+        english (nle/caption-line-breaks "production export keeps words together" "en" 12)]
+    (is (every? #(not (contains? nle/kinsoku-line-start (first %))) (rest japanese)))
+    (is (every? #(not (contains? nle/kinsoku-line-end (last %))) (butlast japanese)))
+    (is (= "「成熟度」を、さらに向上します。" (apply str japanese)))
+    (is (= ["production" "export keeps" "words" "together"] english))
+    (is (= ["abcd" "efgh" "ij"] (nle/caption-line-breaks "abcdefghij" "en" 4)))))
 (deftest multilingual-caption-selection-and-delivery
   (let [localized (-> p
                       (nle/add-caption "en-1" 0 60 "Hello" "en" nle/default-caption-style)
