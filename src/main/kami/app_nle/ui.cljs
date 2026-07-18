@@ -326,15 +326,24 @@
 (defn imsc-referenced-styles [document node]
   (->> (str/split (or (.getAttribute node "style") "") #"\s+")
        (keep #(imsc-element-by-id document %)) vec))
+(defn imsc-node-style-value [document node local-name visited]
+  (when (and node (not (contains? visited node)))
+    (let [visited (conj visited node)
+          inline (.getAttributeNS node ttml-styling-namespace local-name)]
+      (or (when (seq inline) inline)
+          (some #(imsc-node-style-value document % local-name visited)
+                (imsc-referenced-styles document node))
+          (imsc-node-style-value document (.-parentElement node) local-name visited)))))
+(defn imsc-region-id [node]
+  (when node
+    (let [region-id (.getAttribute node "region")]
+      (if (seq region-id) region-id (imsc-region-id (.-parentElement node))))))
 (defn imsc-style-value [document node local-name]
-  (let [region (imsc-element-by-id document (.getAttribute node "region"))
-        candidates (concat [node] (imsc-referenced-styles document node)
-                           (when region [region]) (when region (imsc-referenced-styles document region)))]
-    (some (fn [candidate]
-            (let [value (.getAttributeNS candidate ttml-styling-namespace local-name)]
-              (when (seq value) value))) candidates)))
+  (let [region (imsc-element-by-id document (imsc-region-id node))]
+    (or (imsc-node-style-value document node local-name #{})
+        (imsc-node-style-value document region local-name #{}))))
 (defn imsc-caption-position [document node]
-  (let [region-id (.getAttribute node "region")
+  (let [region-id (imsc-region-id node)
         region (imsc-element-by-id document region-id)
         origin (when region (imsc-style-value document region "origin"))
         y-token (second (str/split (or origin "") #"\s+"))
