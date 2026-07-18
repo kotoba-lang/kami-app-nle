@@ -343,6 +343,10 @@
   (when (= (.-pointerId event) (get-in @state [:trim-drag :pointer-id]))
     (remove-trim-listeners!)
     (swap! state assoc :trim-preview nil :trim-drag nil)))
+(defn key-trim! [event clip edge]
+  (when-let [delta ({"ArrowLeft" -1 "ArrowRight" 1} (.-key event))]
+    (.preventDefault event) (.stopPropagation event)
+    (swap! state update :project nle/trim-edge (:clip/id clip) edge delta)))
 (defn clip-view [c total]
   [:div.clip {:class (when (= (:selected @state) (:clip/id c)) "selected")
               :role "button" :tab-index 0 :aria-label (str "Select clip " (:clip/name c))
@@ -353,10 +357,12 @@
               :on-key-down #(when (#{"Enter" " "} (.-key %)) (swap! state assoc :selected (:clip/id c) :frame (:clip/start-frame c)))}
    [:span.trim-handle.left {:role "slider" :tab-index 0 :aria-label (str "Trim in " (:clip/name c))
                             :aria-valuemin 0 :aria-valuemax (dec (:clip/out-frame c)) :aria-valuenow (:clip/in-frame c)
+                            :on-key-down #(key-trim! % c :in)
                             :on-pointer-down #(start-trim! % c :in total)}]
    [:span.clip-name (:clip/name c)]
    [:span.trim-handle.right {:role "slider" :tab-index 0 :aria-label (str "Trim out " (:clip/name c))
-                             :aria-valuemin (inc (:clip/in-frame c)) :aria-valuenow (:clip/out-frame c)
+                             :aria-valuemin (inc (:clip/in-frame c)) :aria-valuemax 999999 :aria-valuenow (:clip/out-frame c)
+                             :on-key-down #(key-trim! % c :out)
                              :on-pointer-down #(start-trim! % c :out total)}]])
 (defn selected-clip [project id] (some #(when (= id (:clip/id %)) %) (mapcat :track/clips (:project/tracks project))))
 (defn next-video-clip [project id]
