@@ -66,10 +66,27 @@
     (is (= ["asset:audio" 0 90] ((juxt :clip/source-id :clip/in-frame :clip/out-frame) clip)))
     (is (= {:segment/clip-id (:clip/id clip) :segment/source-id "asset:audio"
             :segment/timeline-start-sec 0 :segment/source-start-sec 0 :segment/duration-sec 3
-            :segment/audio-gain 1.0 :segment/audio-eq nle/flat-eq} segment))
+            :segment/audio-gain 1.0 :segment/audio-eq nle/flat-eq
+            :segment/fade-in-sec 0 :segment/fade-out-sec 0 :segment/gain-automation []} segment))
     (is (empty? (nle/validate-project bound)))
     (is (= bound (nle/bind-audio-asset bound "asset:audio" "renamed.wav" 300)))
     (is (= 2 (count (nle/audio-clips (nle/bind-audio-asset bound "asset:music" "music.wav" 120)))))))
+(deftest audio-fade-crossfade-and-gain-envelope
+  (let [bound (nle/bind-audio-asset p "asset:audio" "dialogue.wav" 120)
+        id (:clip/id (first (nle/audio-clips bound)))
+        automated (-> bound (nle/set-audio-fades id 0.5 1.0)
+                      (nle/set-audio-gain-automation id [{:sec 2 :gain 0.5} {:sec 0 :gain 1.5}]))
+        segment (first (nle/audio-segments automated))]
+    (is (= [0.5 1.0] ((juxt :segment/fade-in-sec :segment/fade-out-sec) segment)))
+    (is (= [{:automation/sec 0 :automation/gain 1.5} {:automation/sec 2 :automation/gain 0.5}]
+           (:segment/gain-automation segment)))
+    (is (= 1.0 (nle/automation-value-at 1.0 (:segment/gain-automation segment) 1)))
+    (is (= 0.5 (nle/fade-value-at 4 1 1 0.5)))
+    (is (= 0.5 (nle/fade-value-at 4 1 1 3.5)))
+    (is (empty? (nle/validate-project automated)))
+    (is (= [[:invalid-audio-automation id]]
+           (nle/validate-project (assoc-in automated [:project/tracks 1 :track/clips 0 :clip/audio-gain-automation]
+                                           [{:automation/sec 2 :automation/gain 1} {:automation/sec 1 :automation/gain 1}]))))))
 (deftest production-export-profile
   (is (= ["video/webm;codecs=vp8,opus" 2000000]
          ((juxt :profile/mime :profile/video-bps) (nle/export-profile p))))

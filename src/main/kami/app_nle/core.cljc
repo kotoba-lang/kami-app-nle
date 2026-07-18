@@ -129,6 +129,33 @@
   (update-clip p id #(assoc % :clip/audio-eq (assoc (normalize-eq (:clip/audio-eq %)) band (clamp-db db)))))
 (defn set-master-eq [p band db]
   (assoc p :project/master-eq (assoc (normalize-eq (:project/master-eq p)) band (clamp-db db))))
+(defn set-audio-fades [p id fade-in-sec fade-out-sec]
+  (update-clip p id #(assoc % :clip/fade-in-sec (max 0 (or fade-in-sec 0))
+                              :clip/fade-out-sec (max 0 (or fade-out-sec 0)))))
+(defn set-audio-gain-automation [p id points]
+  (update-clip p id #(assoc % :clip/audio-gain-automation
+                            (->> points
+                                 (mapv (fn [{:keys [sec gain]}]
+                                         {:automation/sec (max 0 sec) :automation/gain (max 0 (min 2 gain))}))
+                                 (sort-by :automation/sec) vec))))
+(defn automation-value-at [base points sec]
+  (let [ordered (sort-by :automation/sec points)
+        before (last (filter #(<= (:automation/sec %) sec) ordered))
+        after (first (filter #(> (:automation/sec %) sec) ordered))]
+    (cond
+      (and before after) (let [span (- (:automation/sec after) (:automation/sec before))
+                               ratio (if (pos? span) (/ (- sec (:automation/sec before)) span) 0)]
+                           (+ (:automation/gain before) (* ratio (- (:automation/gain after) (:automation/gain before)))))
+      before (:automation/gain before)
+      after (let [span (:automation/sec after) ratio (if (pos? span) (/ sec span) 0)]
+              (+ base (* ratio (- (:automation/gain after) base))))
+      :else base)))
+(defn fade-value-at [duration fade-in fade-out sec]
+  (let [fade-in (min duration (max 0 fade-in)) fade-out (min duration (max 0 fade-out))
+        in-value (if (pos? fade-in) (min 1 (/ sec fade-in)) 1)
+        out-start (- duration fade-out)
+        out-value (if (and (pos? fade-out) (> sec out-start)) (max 0 (/ (- duration sec) fade-out)) 1)]
+    (min in-value out-value)))
 (defn ripple-trim-out [p id new-out]
   (let [target (some #(when (= id (:clip/id %)) %) (mapcat :track/clips (:project/tracks p)))
         delta (- new-out (:clip/out-frame target))]
@@ -171,10 +198,17 @@
                                       [clip])))
                                 clips)))))
                   tracks))))
+(declare audio-clips)
 (defn validate-project [p] (vec (concat (when-not (= schema (:project/schema p)) [:unsupported-schema]) (when-not (pos-int? (:project/fps p)) [:invalid-fps])
   (when (and (:project/master-eq p) (not (valid-eq? (:project/master-eq p)))) [:invalid-master-eq])
   (for [c (mapcat :track/clips (:project/tracks p)) :when (or (neg? (:clip/start-frame c)) (>= (:clip/in-frame c) (:clip/out-frame c)))] [:invalid-clip (:clip/id c)])
-  (for [c (mapcat :track/clips (:project/tracks p)) :when (and (:clip/audio-eq c) (not (valid-eq? (:clip/audio-eq c))))] [:invalid-clip-eq (:clip/id c)]))))
+  (for [c (mapcat :track/clips (:project/tracks p)) :when (and (:clip/audio-eq c) (not (valid-eq? (:clip/audio-eq c))))] [:invalid-clip-eq (:clip/id c)])
+  (for [c (audio-clips p) :when (or (neg? (or (:clip/fade-in-sec c) 0)) (neg? (or (:clip/fade-out-sec c) 0)))] [:invalid-audio-fade (:clip/id c)])
+  (for [c (audio-clips p) :let [points (:clip/audio-gain-automation c)]
+        :when (and (seq points)
+                   (or (not (apply <= (map :automation/sec points)))
+                       (some #(or (neg? (:automation/sec %)) (not (<= 0 (:automation/gain %) 2))) points)))]
+    [:invalid-audio-automation (:clip/id c)]))))
 (defn accept-project [value]
   (when (and (map? value) (empty? (validate-project value))) value))
 (def recovery-version 2)
@@ -235,7 +269,10 @@
              :segment/source-start-sec (/ (:clip/in-frame clip) fps)
              :segment/duration-sec (/ (- (:clip/out-frame clip) (:clip/in-frame clip)) fps)
              :segment/audio-gain (or (:clip/audio-gain clip) 1.0)
-             :segment/audio-eq (normalize-eq (:clip/audio-eq clip))})
+             :segment/audio-eq (normalize-eq (:clip/audio-eq clip))
+             :segment/fade-in-sec (or (:clip/fade-in-sec clip) 0)
+             :segment/fade-out-sec (or (:clip/fade-out-sec clip) 0)
+             :segment/gain-automation (vec (:clip/audio-gain-automation clip))})
           (audio-clips p))))
 
 (defn video-clips [p]
