@@ -38,3 +38,8 @@
         mixed (nle/set-clip-audio-gain bound "c" 0.35)]
     (is (= 0.35 (:segment/audio-gain (first (nle/render-segments mixed)))))
     (is (= 2 (:clip/audio-gain (first (nle/video-clips (nle/set-clip-audio-gain bound "c" 9))))))))
+(deftest production-export-profile
+  (is (= ["video/webm;codecs=vp8,opus" 2000000]
+         ((juxt :profile/mime :profile/video-bps) (nle/export-profile p))))
+  (is (= "video/webm;codecs=vp9,opus"
+         (:profile/mime (nle/export-profile (assoc p :project/export-profile :master))))))

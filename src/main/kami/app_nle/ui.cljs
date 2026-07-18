@@ -45,6 +45,10 @@
 (defn media-ready! [] (let [v (primary-video) c @canvas-node] (set! (.-width c) (or (.-videoWidth v) 1280)) (set! (.-height c) (or (.-videoHeight v) 720)) (set! (.-currentTime v) (/ (:pending-source-frame @state) (get-in @state [:project :project/fps]))) (swap! state assoc :decoded? true) (draw-frame!)))
 (defn toggle-play! [] (when (:decoded? @state) (if (:playing? @state) (.pause (primary-video)) (.play (primary-video))) (swap! state update :playing? not)))
 (defn download-blob! [blob] (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")] (set! (.-href a) url) (set! (.-download a) "kami-nle-master.webm") (.click a) (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
+(defn recorder-options [project]
+  (let [profile (nle/export-profile project) preferred (:profile/mime profile)
+        fallback "video/webm;codecs=vp8,opus" mime (if (.isTypeSupported js/MediaRecorder preferred) preferred fallback)]
+    #js {:mimeType mime :videoBitsPerSecond (:profile/video-bps profile) :audioBitsPerSecond (:profile/audio-bps profile)}))
 (defn ensure-export-audio! []
   (or @export-audio
       (let [Ctor (or (.-AudioContext js/window) (.-webkitAudioContext js/window)) ctx (new Ctor)
@@ -136,7 +140,7 @@
             {:keys [context destination]} (ensure-export-audio!)
             audio-track (first (array-seq (.getAudioTracks (.-stream destination))))
             _ (.addTrack stream audio-track)
-            recorder (js/MediaRecorder. stream #js {:mimeType "video/webm;codecs=vp8,opus"}) chunks (array)]
+            recorder (js/MediaRecorder. stream (recorder-options (:project @state))) chunks (array)]
         (.resume context) (set-master-gain! (:master-gain @state)) (set-primary-audio! (first segments)) (swap! state assoc :exporting? true :playing? true)
         (set! (.-ondataavailable recorder) #(when (pos? (.. % -data -size)) (.push chunks (.-data %))))
         (set! (.-onstop recorder) #(do (download-blob! (js/Blob. chunks #js {:type "video/webm"})) (swap! state dissoc :export-segment) (swap! state assoc :exporting? false :playing? false)))
@@ -167,6 +171,9 @@
           [:button {:on-click #(swap! state update :project nle/roll-cut (:clip/id clip) (:clip/id right) 5)} "Roll +5"])]] )
     [:label "Master audio" [:input {:type "range" :min 0 :max 1.5 :step 0.05 :value (:master-gain @state) :aria-label "Master audio gain"
                                      :on-change #(set-master-gain! (js/parseFloat (.. % -target -value)))}]]
+    [:label "Export preset" [:select {:value (name (:project/export-profile project)) :aria-label "Export preset"
+                                       :on-change #(swap! state assoc-in [:project :project/export-profile] (keyword (.. % -target -value)))}
+                              (for [[id profile] nle/export-profiles] ^{:key id} [:option {:value (name id)} (:profile/name profile)])]]
     [:meter {:min -60 :max 0 :value (max -60 (:audio-meter-db @state)) :title (str (.toFixed (:audio-meter-db @state) 1) " dBFS")}]
     [:button {:on-click export-webm! :disabled (or (not decoded?) exporting?)} (if exporting? "Encoding WebM…" "Export WebM")] [:button {:on-click #(js/navigator.clipboard.writeText (pr-str project))} "Copy project EDN"]]
    [:div.monitor [:video {:ref #(reset! video-a-node %) :style {:display "none"} :plays-inline true :on-loaded-metadata media-ready! :on-pause #(swap! state assoc :playing? false)}]

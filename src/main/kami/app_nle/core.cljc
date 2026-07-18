@@ -1,6 +1,11 @@
 (ns kami.app-nle.core)
 (def schema "kami.eizo-project/v1")
-(defn project [m] (merge {:project/schema schema :project/fps 30 :project/tracks []} m))
+(def export-profiles
+  {:review {:profile/name "Review VP8" :profile/mime "video/webm;codecs=vp8,opus" :profile/video-bps 2000000 :profile/audio-bps 128000}
+   :master {:profile/name "Master VP9" :profile/mime "video/webm;codecs=vp9,opus" :profile/video-bps 8000000 :profile/audio-bps 192000}
+   :compact {:profile/name "Compact VP8" :profile/mime "video/webm;codecs=vp8,opus" :profile/video-bps 1000000 :profile/audio-bps 96000}})
+(defn project [m] (merge {:project/schema schema :project/fps 30 :project/export-profile :review :project/tracks []} m))
+(defn export-profile [p] (get export-profiles (:project/export-profile p) (:review export-profiles)))
 (defn clip-end [c] (+ (:clip/start-frame c) (- (:clip/out-frame c) (:clip/in-frame c))))
 (defn duration-frames [p] (reduce max 0 (map clip-end (mapcat :track/clips (:project/tracks p)))))
 (defn- pad2 [n] (if (< n 10) (str "0" n) (str n)))
