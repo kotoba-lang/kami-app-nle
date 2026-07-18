@@ -88,6 +88,21 @@
                      (if top? (+ content-y font-size) (- (+ content-y content-height) block-height)))
     top? (+ safe-y font-size (* index (+ block-height (* font-size 0.5))))
     :else (- canvas-height safe-y block-height (* index (+ block-height (* font-size 0.5))))))
+(defn draw-caption-ruby! [ctx caption style x base-y font-size]
+  (when (and (not (contains? #{:tbrl :tblr} (:caption/writing-mode style)))
+             (seq (:caption/ruby-runs style)))
+    (let [line (first (str/split (:caption/text caption) #"\r?\n"))
+          full-width (.-width (.measureText ctx line))
+          left (case (:caption/align style) :left x :right (- x full-width) (- x (/ full-width 2)))]
+      (doseq [{base :ruby/base annotation :ruby/text} (:caption/ruby-runs style)
+              :let [index (str/index-of line base)] :when (some? index)]
+        (let [prefix-width (.-width (.measureText ctx (subs line 0 index)))
+              base-width (.-width (.measureText ctx base))]
+          (.save ctx)
+          (set! (.-font ctx) (str "600 " (max 9 (js/Math.round (* font-size 0.46))) "px sans-serif"))
+          (set! (.-textAlign ctx) "center")
+          (.fillText ctx annotation (+ left prefix-width (/ base-width 2)) (- base-y (* font-size 0.78)))
+          (.restore ctx))))))
 (defn canvas-context [canvas project]
   (.getContext canvas "2d" #js {:colorSpace (if (= :display-p3 (:color/output-space (nle/color-pipeline project)))
                                                "display-p3" "srgb")}))
@@ -170,8 +185,10 @@
                                  (+ content-x content-width (- font-size)) content-x)]
                   (doseq [[glyph-index glyph] (map-indexed vector glyphs)]
                     (.fillText ctx (str glyph) column-x (+ content-y font-size (* glyph-index line-height)))))
-                (doseq [[line-index line] (map-indexed vector lines)]
-                  (.fillText ctx line x (+ base-y (* line-index line-height))))))
+                (do
+                  (doseq [[line-index line] (map-indexed vector lines)]
+                    (.fillText ctx line x (+ base-y (* line-index line-height))))
+                  (draw-caption-ruby! ctx caption style x base-y font-size))))
             (when custom-region? (.restore ctx))))
         (set! (.-globalAlpha ctx) 1)
         (swap! state assoc :frame caption-frame
@@ -481,14 +498,30 @@
                                          (imsc-specified-style-value document node "visibility" #{}))
                                        (reverse active-sets)))]
     (when visible? overrides)))
-(defn imsc-node-text [node]
+(declare imsc-node-text)
+(defn imsc-ruby-value [document node]
+  (imsc-style-value document node "ruby"))
+(defn imsc-node-text [document node]
   (apply str
          (map (fn [child]
                 (cond (= 3 (.-nodeType child)) (.-nodeValue child)
                       (= 4 (.-nodeType child)) (.-nodeValue child)
                       (= "br" (.-localName child)) "\n"
-                      :else (imsc-node-text child)))
+                      (#{"text" "textContainer"} (imsc-ruby-value document child)) ""
+                      :else (imsc-node-text document child)))
               (array-seq (.-childNodes node)))))
+(defn imsc-ruby-runs [document node]
+  (->> (array-seq (.getElementsByTagNameNS node ttml-namespace "span"))
+       (filter #(= "container" (imsc-ruby-value document %)))
+       (keep (fn [container]
+               (let [spans (array-seq (.getElementsByTagNameNS container ttml-namespace "span"))
+                     base-node (first (filter #(= "base" (imsc-ruby-value document %)) spans))
+                     text-node (first (filter #(= "text" (imsc-ruby-value document %)) spans))
+                     base (some->> base-node (imsc-node-text document) str/trim)
+                     annotation (some->> text-node (imsc-node-text document) str/trim)]
+                 (when (and (seq base) (seq annotation))
+                   {:ruby/base base :ruby/text annotation}))))
+       (take 32) vec))
 (defn parse-imsc-document [text fps]
   (when (and (string? text) (not (re-find #"(?i)<!DOCTYPE" text)))
     (let [document (.parseFromString (js/DOMParser.) text "application/xml")
@@ -504,18 +537,20 @@
                          (mapcat (fn [node]
                                    (let [start (nle/imsc-time->frame (.getAttribute node "begin") fps)
                                          end (nle/imsc-time->frame (.getAttribute node "end") fps)
-                                         text (str/trim (imsc-node-text node))]
+                                         text (str/trim (imsc-node-text document node))
+                                         ruby-runs (imsc-ruby-runs document node)
+                                         with-ruby #(cond-> % (seq ruby-runs) (assoc :caption/ruby-runs ruby-runs))]
                                      (if (and (number? start) (number? end) (< start end))
                                        (if-let [segments (imsc-set-segments document node fps start end)]
                                          (keep (fn [{:keys [segment/start segment/end segment/sets]}]
                                                  (when-let [style (imsc-segment-style document node sets)]
                                                    {:caption/start-frame start :caption/end-frame end
-                                                    :caption/text text :caption/style style}))
+                                                    :caption/text text :caption/style (with-ruby style)}))
                                                segments)
                                          [{:caption/start-frame nil :caption/end-frame nil
                                            :caption/text text :caption/style nil}])
                                        [{:caption/start-frame start :caption/end-frame end
-                                         :caption/text text :caption/style (imsc-segment-style document node [])}])))
+                                         :caption/text text :caption/style (with-ruby (imsc-segment-style document node []))}])))
                                  nodes))]
           {:language language :cues cues})))))
 (defn import-imsc1! [event]

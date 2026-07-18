@@ -91,7 +91,14 @@
       :color/saturation (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
       p)))
 (defn normalize-caption-style [style]
-  (cond-> {:caption/position (if (contains? #{:top :bottom} (:caption/position style)) (:caption/position style) :bottom)
+  (let [ruby-runs (->> (:caption/ruby-runs style)
+                       (keep (fn [run]
+                               (let [base (:ruby/base run) text (:ruby/text run)]
+                                 (when (and (string? base) (not (str/blank? base)) (<= (count base) 64)
+                                            (string? text) (not (str/blank? text)) (<= (count text) 64))
+                                   {:ruby/base base :ruby/text text}))))
+                       (take 32) vec)]
+   (cond-> {:caption/position (if (contains? #{:top :bottom} (:caption/position style)) (:caption/position style) :bottom)
            :caption/align (if (contains? #{:left :center :right} (:caption/align style)) (:caption/align style) :center)
            :caption/font-scale (clamp 0.5 2.0 (or (:caption/font-scale style) 1.0))}
     (number? (:caption/x-percent style)) (assoc :caption/x-percent (clamp 0.0 100.0 (:caption/x-percent style)))
@@ -104,7 +111,8 @@
          (every? number? (:caption/padding-percent style)))
     (assoc :caption/padding-percent (mapv #(clamp 0.0 50.0 %) (:caption/padding-percent style)))
     (contains? #{:before :center :after} (:caption/display-align style))
-    (assoc :caption/display-align (:caption/display-align style))))
+    (assoc :caption/display-align (:caption/display-align style))
+    (seq ruby-runs) (assoc :caption/ruby-runs ruby-runs))))
 (def language-pattern #"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 (def caption-statuses #{:draft :review :approved})
 (defn caption-status [caption] (if (contains? caption-statuses (:caption/status caption))
@@ -377,8 +385,21 @@
 (defn xml-escape [value]
   (-> (str value) (str/replace "&" "&amp;") (str/replace "<" "&lt;")
       (str/replace ">" "&gt;") (str/replace "\"" "&quot;") (str/replace "'" "&apos;")))
-(defn- imsc-text [text]
+(defn- imsc-plain-text [text]
   (str/replace (xml-escape text) "\n" "<br/>"))
+(defn- imsc-text [caption]
+  (let [text (:caption/text caption)
+        runs (:caption/ruby-runs (normalize-caption-style (:caption/style caption)))]
+    (loop [remaining text runs runs result ""]
+      (if-let [{base :ruby/base annotation :ruby/text} (first runs)]
+        (if-let [index (str/index-of remaining base)]
+          (recur (subs remaining (+ index (count base))) (rest runs)
+                 (str result (imsc-plain-text (subs remaining 0 index))
+                      "<span tts:ruby=\"container\"><span tts:ruby=\"base\">"
+                      (imsc-plain-text base) "</span><span tts:ruby=\"text\">"
+                      (imsc-plain-text annotation) "</span></span>"))
+          (recur remaining (rest runs) result))
+        (str result (imsc-plain-text remaining))))))
 (defn- xml-ncname [index value]
   (str "cue-" index "-" (str/replace (str value) #"[^A-Za-z0-9_.-]" "-")))
 (defn caption-custom-region? [style]
@@ -427,7 +448,7 @@
                                                      (name (:caption/position style)))
                                   "\" tts:textAlign=\"" (name (:caption/align style))
                                   "\" tts:fontSize=\"" (* 100 (:caption/font-scale style)) "%\">"
-                                  (imsc-text (:caption/text caption)) "</p>"))) cues))
+                                  (imsc-text caption) "</p>"))) cues))
           (when (seq cues) "\n") "  </div></body>\n</tt>\n"))))
 (defn import-imsc-cues [p requested-language cues]
   (let [language (normalize-language requested-language)]
