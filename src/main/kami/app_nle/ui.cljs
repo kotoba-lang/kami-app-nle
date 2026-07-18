@@ -78,6 +78,16 @@
 (defn color-filter [project]
   (let [{:color/keys [exposure-stops contrast saturation]} (nle/color-pipeline project)]
     (str "brightness(" (js/Math.pow 2 exposure-stops) ") contrast(" contrast ") saturate(" saturation ")")))
+(defn caption-base-y [custom-region? display-align top? content-y content-height
+                       block-height font-size safe-y canvas-height index]
+  (cond
+    custom-region? (case display-align
+                     :before (+ content-y font-size)
+                     :center (+ content-y (/ (- content-height block-height) 2) font-size)
+                     :after (- (+ content-y content-height) block-height)
+                     (if top? (+ content-y font-size) (- (+ content-y content-height) block-height)))
+    top? (+ safe-y font-size (* index (+ block-height (* font-size 0.5))))
+    :else (- canvas-height safe-y block-height (* index (+ block-height (* font-size 0.5))))))
 (defn canvas-context [canvas project]
   (.getContext canvas "2d" #js {:colorSpace (if (= :display-p3 (:color/output-space (nle/color-pipeline project)))
                                                "display-p3" "srgb")}))
@@ -122,36 +132,46 @@
                 lines (str/split (:caption/text caption) #"\r?\n")
                 font-size (max 18 (js/Math.round (* (.-height c) 0.055 (:caption/font-scale style))))
                 line-height (* font-size 1.25)
-                custom-region? (and (contains? style :caption/x-percent) (contains? style :caption/y-percent))
-                region-x (* (.-width c) (/ (or (:caption/x-percent style) 0) 100))
-                region-y (* (.-height c) (/ (or (:caption/y-percent style) 0) 100))
+                custom-region? (nle/caption-custom-region? style)
+                top? (= :top (:caption/position style))
+                region-x (* (.-width c) (/ (or (:caption/x-percent style) 10) 100))
+                region-y (* (.-height c) (/ (or (:caption/y-percent style) (if top? 8 62)) 100))
                 region-width (* (.-width c) (/ (or (:caption/width-percent style) 80) 100))
-                region-height (* (.-height c) (/ (or (:caption/height-percent style) 30) 100))
-                safe-x (if custom-region? (+ region-x (* region-width 0.05)) (* (.-width c) 0.05))
-                safe-y (if custom-region? (+ region-y (* region-height 0.05)) (* (.-height c) 0.05))
+                region-height (* (.-height c) (/ (or (:caption/height-percent style) (if top? 38 30)) 100))
+                [pad-top pad-right pad-bottom pad-left] (or (:caption/padding-percent style) [5 5 5 5])
+                content-x (+ region-x (* region-width (/ pad-left 100)))
+                content-y (+ region-y (* region-height (/ pad-top 100)))
+                content-width (max 1 (- region-width (* region-width (/ (+ pad-left pad-right) 100))))
+                content-height (max 1 (- region-height (* region-height (/ (+ pad-top pad-bottom) 100))))
+                safe-x (if custom-region? content-x (* (.-width c) 0.05))
+                safe-y (if custom-region? content-y (* (.-height c) 0.05))
                 align (:caption/align style)
                 x (case align :left safe-x
-                        :right (if custom-region? (- (+ region-x region-width) (* region-width 0.05))
+                        :right (if custom-region? (+ content-x content-width)
                                    (- (.-width c) safe-x))
-                        (if custom-region? (+ region-x (/ region-width 2)) (/ (.-width c) 2)))
+                        (if custom-region? (+ content-x (/ content-width 2)) (/ (.-width c) 2)))
                 block-height (* (count lines) line-height)
-                base-y (if custom-region?
-                         (if (= :top (:caption/position style)) (+ safe-y font-size)
-                             (- (+ region-y region-height) (* region-height 0.05) block-height))
-                         (if (= :top (:caption/position style))
-                         (+ safe-y font-size (* index (+ block-height (* font-size 0.5))))
-                         (- (.-height c) safe-y block-height (* index (+ block-height (* font-size 0.5))))))]
+                base-y (caption-base-y custom-region? (:caption/display-align style) top?
+                                       content-y content-height block-height font-size safe-y
+                                       (.-height c) index)]
             (when custom-region?
               (.save ctx) (.beginPath ctx) (.rect ctx region-x region-y region-width region-height) (.clip ctx))
             (set! (.-font ctx) (str "600 " font-size "px sans-serif"))
+            (set! (.-direction ctx) (if (= :rltb (:caption/writing-mode style)) "rtl" "ltr"))
             (set! (.-textAlign ctx) (name align))
             (let [widths (mapv #(.-width (.measureText ctx %)) lines) width (+ 24 (apply max 0 widths))
                   box-x (case align :left (- x 12) :right (- x width -12) (- x (/ width 2)))]
               (set! (.-fillStyle ctx) "rgba(0,0,0,0.72)")
               (.fillRect ctx box-x (- base-y font-size) width (+ block-height (* font-size 0.25)))
               (set! (.-fillStyle ctx) "white")
-              (doseq [[line-index line] (map-indexed vector lines)]
-                (.fillText ctx line x (+ base-y (* line-index line-height)))))
+              (if (contains? #{:tbrl :tblr} (:caption/writing-mode style))
+                (let [glyphs (remove #{\newline \return} (seq (:caption/text caption)))
+                      column-x (if (= :tbrl (:caption/writing-mode style))
+                                 (+ content-x content-width (- font-size)) content-x)]
+                  (doseq [[glyph-index glyph] (map-indexed vector glyphs)]
+                    (.fillText ctx (str glyph) column-x (+ content-y font-size (* glyph-index line-height)))))
+                (doseq [[line-index line] (map-indexed vector lines)]
+                  (.fillText ctx line x (+ base-y (* line-index line-height))))))
             (when custom-region? (.restore ctx))))
         (set! (.-globalAlpha ctx) 1)
         (swap! state assoc :frame caption-frame
@@ -382,6 +402,16 @@
     (when (and x y (str/ends-with? x "%") (str/ends-with? y "%"))
       (let [x-value (js/parseFloat x) y-value (js/parseFloat y)]
         (when (and (js/Number.isFinite x-value) (js/Number.isFinite y-value)) [x-value y-value])))))
+(defn imsc-padding [value]
+  (let [values (mapv (fn [token]
+                       (when (str/ends-with? token "%") (js/parseFloat token)))
+                     (remove str/blank? (str/split (or value "") #"\s+")))]
+    (when (and (<= 1 (count values) 4) (every? js/Number.isFinite values))
+      (case (count values)
+        1 (vec (repeat 4 (first values)))
+        2 [(first values) (second values) (first values) (second values)]
+        3 [(first values) (second values) (nth values 2) (second values)]
+        values))))
 (defn imsc-font-scale [font-size]
   (if (and font-size (str/ends-with? font-size "%"))
     (/ (js/parseFloat font-size) 100) 1.0))
@@ -416,24 +446,36 @@
 (defn imsc-segment-style [document node active-sets]
   (let [origin (imsc-percent-pair (imsc-style-value document node "origin"))
         extent (imsc-percent-pair (imsc-style-value document node "extent"))
+        writing (imsc-style-value document node "writingMode")
+        padding (imsc-padding (imsc-style-value document node "padding"))
+        display (imsc-style-value document node "displayAlign")
         base (cond-> {:caption/position (imsc-caption-position document node)
                       :caption/align (keyword (let [align (imsc-style-value document node "textAlign")]
                                                 (if (#{"left" "center" "right"} align) align "center")))
                       :caption/font-scale (imsc-font-scale (imsc-style-value document node "fontSize"))}
                origin (assoc :caption/x-percent (first origin) :caption/y-percent (second origin))
-               extent (assoc :caption/width-percent (first extent) :caption/height-percent (second extent)))
+               extent (assoc :caption/width-percent (first extent) :caption/height-percent (second extent))
+               (#{"lrtb" "rltb" "tbrl" "tblr"} writing) (assoc :caption/writing-mode (keyword writing))
+               padding (assoc :caption/padding-percent padding)
+               (#{"before" "center" "after"} display) (assoc :caption/display-align (keyword display)))
         overrides (reduce
                    (fn [style {:keys [set/node]}]
                      (let [align (imsc-specified-style-value document node "textAlign" #{})
                            font-size (imsc-specified-style-value document node "fontSize" #{})
                            origin (imsc-percent-pair (imsc-specified-style-value document node "origin" #{}))
-                           extent (imsc-percent-pair (imsc-specified-style-value document node "extent" #{}))]
+                           extent (imsc-percent-pair (imsc-specified-style-value document node "extent" #{}))
+                           writing (imsc-specified-style-value document node "writingMode" #{})
+                           padding (imsc-padding (imsc-specified-style-value document node "padding" #{}))
+                           display (imsc-specified-style-value document node "displayAlign" #{})]
                        (cond-> style
                          (#{"left" "center" "right"} align) (assoc :caption/align (keyword align))
                          (seq font-size) (assoc :caption/font-scale (imsc-font-scale font-size))
                          origin (assoc :caption/x-percent (first origin) :caption/y-percent (second origin)
                                        :caption/position (if (< (second origin) 50) :top :bottom))
-                         extent (assoc :caption/width-percent (first extent) :caption/height-percent (second extent)))))
+                         extent (assoc :caption/width-percent (first extent) :caption/height-percent (second extent))
+                         (#{"lrtb" "rltb" "tbrl" "tblr"} writing) (assoc :caption/writing-mode (keyword writing))
+                         padding (assoc :caption/padding-percent padding)
+                         (#{"before" "center" "after"} display) (assoc :caption/display-align (keyword display)))))
                    base active-sets)
         visible? (not= "hidden" (some (fn [{:keys [set/node]}]
                                          (imsc-specified-style-value document node "visibility" #{}))
