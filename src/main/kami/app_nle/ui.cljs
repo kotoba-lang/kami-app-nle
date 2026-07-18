@@ -1194,10 +1194,35 @@
        [:small {:aria-label (str (:caption/id caption) " line break preview")}
         (str/join " ⏎ " (nle/caption-line-breaks (:caption/text caption) (nle/caption-language caption) 24))]
        (when-let [animations (seq (:caption/animations (nle/normalize-caption-style (:caption/style caption))))]
-         [:small {:aria-label (str (:caption/id caption) " animation summary")}
-          (str/join ", " (map (fn [{:animation/keys [property start-frame end-frame interpolation]}]
-                                  (str (name property) " " (name interpolation) " "
-                                       start-frame "→" end-frame)) animations))])
+         [:div
+          [:small {:aria-label (str (:caption/id caption) " animation summary")}
+           (str/join ", " (map (fn [{:animation/keys [property start-frame end-frame interpolation]}]
+                                   (str (name property) " " (name interpolation) " "
+                                        start-frame "→" end-frame)) animations))]
+          (for [[index animation] (map-indexed vector animations)]
+            ^{:key index} [:span
+             [:select {:value (name (:animation/interpolation animation))
+                       :aria-label (str (:caption/id caption) " animation " index " interpolation")
+                       :on-change #(swap! state update :project nle/edit-caption-animation
+                                          (:caption/id caption) index
+                                          {:animation/interpolation (keyword (.. % -target -value))
+                                           :animation/key-spline (or (:animation/key-spline animation)
+                                                                     [0.25 0.1 0.25 1.0])})}
+              [:option {:value "linear"} "Linear"] [:option {:value "discrete"} "Discrete"]
+              [:option {:value "spline"} "Spline"]]
+             (when (= :spline (:animation/interpolation animation))
+               (for [[point value] (map-indexed vector (:animation/key-spline animation))]
+                 ^{:key point}
+                 [:input {:type "number"
+                          :min (if (= point 2) (first (:animation/key-spline animation)) 0)
+                          :max (if (zero? point) (nth (:animation/key-spline animation) 2) 1)
+                          :step 0.01 :value value
+                          :aria-label (str (:caption/id caption) " animation " index " spline " point)
+                          :on-change #(swap! state update :project nle/edit-caption-animation
+                                             (:caption/id caption) index
+                                             {:animation/key-spline
+                                              (assoc (:animation/key-spline animation) point
+                                                     (js/parseFloat (.. % -target -value)))})}]))])])
        [:input {:value (nle/caption-language caption) :aria-label (str (:caption/id caption) " language")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
                                    {:caption/language (.. % -target -value)})}]

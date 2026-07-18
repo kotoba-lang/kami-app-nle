@@ -115,6 +115,23 @@
                 (= :spline interpolation) (assoc :animation/key-spline (nth key-splines index))))
             (range segment-count))
       [])))
+(declare normalize-caption-style)
+(defn edit-caption-animation [p caption-id animation-index changes]
+  (update p :project/captions
+          (fn [captions]
+            (mapv (fn [caption]
+                    (if (= caption-id (:caption/id caption))
+                      (let [animations (vec (get-in caption [:caption/style :caption/animations]))
+                            candidate (merge (get animations animation-index) changes)
+                            normalized (:caption/animations
+                                        (normalize-caption-style
+                                         {:caption/animations [candidate]}))]
+                        (if (= 1 (count normalized))
+                          (assoc-in caption [:caption/style :caption/animations animation-index]
+                                    (first normalized))
+                          caption))
+                      caption))
+                  captions))))
 (defn normalize-caption-style [style]
   (let [ruby-runs (->> (:caption/ruby-runs style)
                        (keep (fn [run]
