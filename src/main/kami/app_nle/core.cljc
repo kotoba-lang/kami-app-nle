@@ -52,6 +52,17 @@
 (defn update-clip [p id f] (update p :project/tracks #(mapv (fn [t] (update t :track/clips (fn [cs] (mapv (fn [c] (if (= id (:clip/id c)) (f c) c)) cs)))) %)))
 (defn move-clip [p id frame] (update-clip p id #(assoc % :clip/start-frame (max 0 frame))))
 (defn trim-clip [p id in-frame out-frame] (if (< in-frame out-frame) (update-clip p id #(assoc % :clip/in-frame in-frame :clip/out-frame out-frame)) p))
+(defn trim-edge [p id edge delta]
+  (update-clip p id
+               (fn [clip]
+                 (case edge
+                   :in (let [new-in (+ (:clip/in-frame clip) delta)
+                             new-start (+ (:clip/start-frame clip) delta)]
+                         (if (and (<= 0 new-in) (< new-in (:clip/out-frame clip)) (<= 0 new-start))
+                           (assoc clip :clip/in-frame new-in :clip/start-frame new-start) clip))
+                   :out (let [new-out (+ (:clip/out-frame clip) delta)]
+                          (if (> new-out (:clip/in-frame clip)) (assoc clip :clip/out-frame new-out) clip))
+                   clip))))
 (defn set-transition [p id transition-type duration-frames]
   (update-clip p id #(assoc % :clip/transition-out {:transition/type transition-type
                                                      :transition/duration-frames (max 0 duration-frames)})))

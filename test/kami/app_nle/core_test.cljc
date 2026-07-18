@@ -32,6 +32,15 @@
     (is (= [65 15 65] [(get-in roll [:project/tracks 0 :track/clips 0 :clip/out-frame])
                        (get-in roll [:project/tracks 0 :track/clips 1 :clip/in-frame])
                        (get-in roll [:project/tracks 0 :track/clips 1 :clip/start-frame])]))))
+(deftest pointer-edge-trim-preserves-source-timeline-alignment
+  (let [trimmed-in (nle/trim-edge p "c" :in 5)
+        trimmed-out (nle/trim-edge p "c" :out -10)]
+    (is (= [15 5 110] ((juxt :clip/in-frame :clip/start-frame :clip/out-frame)
+                        (get-in trimmed-in [:project/tracks 0 :track/clips 0]))))
+    (is (= [10 0 100] ((juxt :clip/in-frame :clip/start-frame :clip/out-frame)
+                        (get-in trimmed-out [:project/tracks 0 :track/clips 0]))))
+    (is (= p (nle/trim-edge p "c" :in -20)))
+    (is (= p (nle/trim-edge p "c" :out -100)))))
 (deftest production-audio-mix-authority
   (let [bound (-> p (assoc-in [:project/tracks 0 :track/type] :video)
                   (assoc-in [:project/tracks 0 :track/clips 0 :clip/source-id] "asset:a"))
