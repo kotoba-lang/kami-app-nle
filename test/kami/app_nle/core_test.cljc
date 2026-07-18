@@ -185,6 +185,21 @@
     (is (= "「成熟度」を、さらに向上します。" (apply str japanese)))
     (is (= ["production" "export keeps" "words" "together"] english))
     (is (= ["abcd" "efgh" "ij"] (nle/caption-line-breaks "abcdefghij" "en" 4)))))
+(deftest continuous-caption-animation-interpolates-and-exports
+  (let [style (assoc nle/default-caption-style :caption/animations
+                     [{:animation/property :opacity :animation/from 0 :animation/to 1
+                       :animation/start-frame 30 :animation/end-frame 60}
+                      {:animation/property :font-scale :animation/from 1 :animation/to 1.5
+                       :animation/start-frame 30 :animation/end-frame 60}])
+        project (-> p (nle/add-caption "animated" 30 90 "Fade" "en" style)
+                    (nle/set-caption-status "animated" :approved "editor" 1))
+        caption (first (:project/captions project)) mid (nle/caption-style-at-frame caption 45)
+        xml (nle/imsc1 project "en")]
+    (is (= 0.5 (:caption/opacity mid)))
+    (is (= 1.25 (:caption/font-scale mid)))
+    (is (= 1.0 (:caption/opacity (nle/caption-style-at-frame caption 60))))
+    (is (str/includes? xml "<animate attributeName=\"tts:opacity\" from=\"0.0\" to=\"1.0\" begin=\"0.0s\" dur=\"1.0s\" fill=\"freeze\"/>"))
+    (is (str/includes? xml "attributeName=\"tts:fontSize\" from=\"100.0%\" to=\"150.0%\""))))
 (deftest multilingual-caption-selection-and-delivery
   (let [localized (-> p
                       (nle/add-caption "en-1" 0 60 "Hello" "en" nle/default-caption-style)
@@ -280,6 +295,7 @@
     (is (nil? (nle/import-imsc-cues existing "en" [{:caption/start-frame 20 :caption/end-frame 10
                                                        :caption/text "bad"}])))))
 (deftest imsc-time-expressions-normalize-to-project-frames
+  (is (nil? (nle/imsc-time->frame nil 30)))
   (is (= 45 (nle/imsc-time->frame "1.5s" 30)))
   (is (= 45 (nle/imsc-time->frame "00:00:01:15" 30)))
   (is (= 45 (nle/imsc-time->frame "00:00:01.500" 30)))

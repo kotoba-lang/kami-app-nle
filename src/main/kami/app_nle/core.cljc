@@ -97,7 +97,20 @@
                                  (when (and (string? base) (not (str/blank? base)) (<= (count base) 64)
                                             (string? text) (not (str/blank? text)) (<= (count text) 64))
                                    {:ruby/base base :ruby/text text}))))
-                       (take 32) vec)]
+                       (take 32) vec)
+        animations (->> (:caption/animations style)
+                        (keep (fn [animation]
+                                (let [property (:animation/property animation)
+                                      from (:animation/from animation) to (:animation/to animation)
+                                      start (:animation/start-frame animation) end (:animation/end-frame animation)
+                                      bounds (case property :opacity [0.0 1.0] :font-scale [0.5 2.0] nil)]
+                                  (when (and bounds (number? from) (number? to) (nat-int? start)
+                                             (pos-int? end) (< start end))
+                                    {:animation/property property
+                                     :animation/from (double (clamp (first bounds) (second bounds) from))
+                                     :animation/to (double (clamp (first bounds) (second bounds) to))
+                                     :animation/start-frame start :animation/end-frame end}))))
+                        (take 16) vec)]
    (cond-> {:caption/position (if (contains? #{:top :bottom} (:caption/position style)) (:caption/position style) :bottom)
            :caption/align (if (contains? #{:left :center :right} (:caption/align style)) (:caption/align style) :center)
            :caption/font-scale (clamp 0.5 2.0 (or (:caption/font-scale style) 1.0))}
@@ -112,7 +125,19 @@
     (assoc :caption/padding-percent (mapv #(clamp 0.0 50.0 %) (:caption/padding-percent style)))
     (contains? #{:before :center :after} (:caption/display-align style))
     (assoc :caption/display-align (:caption/display-align style))
-    (seq ruby-runs) (assoc :caption/ruby-runs ruby-runs))))
+    (number? (:caption/opacity style)) (assoc :caption/opacity (clamp 0.0 1.0 (:caption/opacity style)))
+    (seq ruby-runs) (assoc :caption/ruby-runs ruby-runs)
+    (seq animations) (assoc :caption/animations animations))))
+(defn caption-style-at-frame [caption frame]
+  (let [style (normalize-caption-style (:caption/style caption))]
+    (reduce (fn [current {:animation/keys [property from to start-frame end-frame]}]
+              (let [ratio (cond (<= frame start-frame) 0.0
+                                (>= frame end-frame) 1.0
+                                :else (/ (- frame start-frame) (- end-frame start-frame)))
+                    value (double (+ from (* ratio (- to from))))]
+                (case property :opacity (assoc current :caption/opacity value)
+                               :font-scale (assoc current :caption/font-scale value) current)))
+            style (:caption/animations style))))
 (def language-pattern #"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 (def caption-statuses #{:draft :review :approved})
 (defn caption-status [caption] (if (contains? caption-statuses (:caption/status caption))
@@ -352,7 +377,7 @@
     (str (pad2 hours) ":" (pad2 minutes) ":" (pad2 seconds) "." (pad3 ms))))
 (defn- parse-int [value] #?(:clj (Long/parseLong value) :cljs (js/parseInt value 10)))
 (defn vtt-time->frame [timecode fps]
-  (when-let [[_ hours minutes seconds millis] (re-matches #"^(\d+):(\d{2}):(\d{2})\.(\d{3})$" timecode)]
+  (when-let [[_ hours minutes seconds millis] (re-matches #"^(\d+):(\d{2}):(\d{2})\.(\d{3})$" (or timecode ""))]
     (let [total-ms (+ (* (parse-int hours) 3600000) (* (parse-int minutes) 60000)
                       (* (parse-int seconds) 1000) (parse-int millis))]
       (long #?(:clj (Math/round (double (* fps (/ total-ms 1000.0))))
@@ -433,6 +458,23 @@
                       (imsc-plain-text annotation) "</span></span>"))
           (recur remaining (rest runs) result))
         (str result (imsc-plain-text remaining))))))
+(defn- canonical-decimal [value]
+  (let [text (str (double value))]
+    (if (str/includes? text ".") text (str text ".0"))))
+(defn- imsc-animation-elements [caption fps]
+  (let [caption-start (:caption/start-frame caption)]
+    (apply str
+           (for [{:animation/keys [property from to start-frame end-frame]}
+                 (:caption/animations (normalize-caption-style (:caption/style caption)))
+                 :let [attribute (case property :opacity "tts:opacity" :font-scale "tts:fontSize")
+                       encode (fn [value] (if (= property :font-scale)
+                                            (str (canonical-decimal (* 100 value)) "%")
+                                            (canonical-decimal value)))]]
+             (str "<animate attributeName=\"" attribute "\" from=\"" (encode from)
+                  "\" to=\"" (encode to) "\" begin=\""
+                  (canonical-decimal (/ (- start-frame caption-start) (double fps)))
+                  "s\" dur=\"" (canonical-decimal (/ (- end-frame start-frame) (double fps)))
+                  "s\" fill=\"freeze\"/>")))))
 (defn- xml-ncname [index value]
   (str "cue-" index "-" (str/replace (str value) #"[^A-Za-z0-9_.-]" "-")))
 (defn caption-custom-region? [style]
@@ -481,6 +523,7 @@
                                                      (name (:caption/position style)))
                                   "\" tts:textAlign=\"" (name (:caption/align style))
                                   "\" tts:fontSize=\"" (* 100 (:caption/font-scale style)) "%\">"
+                                  (imsc-animation-elements caption (:project/fps p))
                                   (imsc-text caption) "</p>"))) cues))
           (when (seq cues) "\n") "  </div></body>\n</tt>\n"))))
 (defn import-imsc-cues [p requested-language cues]
