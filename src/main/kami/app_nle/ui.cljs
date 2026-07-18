@@ -825,6 +825,12 @@
     [:label.import "Import WebVTT for language"
      [:input {:type "file" :accept ".vtt,text/vtt" :aria-label "Import WebVTT"
               :on-change import-webvtt!}]]
+    [:button {:on-click #(swap! state update :project nle/clone-caption-language
+                                (nle/normalize-language (:project/caption-language project))
+                                (:caption-language @state))
+              :disabled (= (nle/normalize-language (:project/caption-language project))
+                           (nle/normalize-language (:caption-language @state)))}
+     "Clone active captions to new language"]
     [:label "Burn-in / export language"
      [:select {:value (nle/normalize-language (:project/caption-language project))
                :aria-label "Active caption language"
@@ -871,7 +877,9 @@
                  :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
                                     {:caption/style (assoc (nle/normalize-caption-style (:caption/style caption))
                                                            :caption/align (keyword (.. % -target -value)))})}
-        [:option {:value "left"} "Left"] [:option {:value "center"} "Center"] [:option {:value "right"} "Right"]]])
+        [:option {:value "left"} "Left"] [:option {:value "center"} "Center"] [:option {:value "right"} "Right"]]
+       [:button {:aria-label (str "Delete " (:caption/id caption))
+                 :on-click #(swap! state update :project nle/remove-caption (:caption/id caption))} "Delete"]])
     [:button {:on-click export-webvtt! :disabled (empty? (:project/captions project))} "Export WebVTT"]
     (when-let [clip (selected-clip project selected)]
       [:div.asset [:strong (str "Edit • " (:clip/name clip))]

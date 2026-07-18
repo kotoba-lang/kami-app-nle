@@ -101,6 +101,21 @@
 (defn set-caption-language [p language]
   (if (and (string? language) (re-matches language-pattern language))
     (assoc p :project/caption-language language) p))
+(defn remove-caption [p caption-id]
+  (update p :project/captions #(vec (remove (fn [caption] (= caption-id (:caption/id caption))) %))))
+(defn clone-caption-language [p source-language target-language]
+  (let [source (normalize-language source-language) target (normalize-language target-language)
+        source-captions (filter #(= source (caption-language %)) (:project/captions p))]
+    (if (and (not= source target) (seq source-captions)
+             (= target-language target))
+      (let [retained (remove #(= target (caption-language %)) (:project/captions p))
+            cloned (map-indexed (fn [index caption]
+                                  (assoc caption :caption/id (str "translation:" target ":" index)
+                                                 :caption/language target)) source-captions)]
+        (assoc p :project/captions (->> (concat retained cloned)
+                                        (sort-by (juxt :caption/start-frame :caption/id)) vec)
+                 :project/caption-language target))
+      p)))
 (defn add-caption
   ([p caption-id start-frame end-frame text]
    (add-caption p caption-id start-frame end-frame text "en" default-caption-style))
