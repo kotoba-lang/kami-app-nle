@@ -92,6 +92,19 @@
          ((juxt :profile/mime :profile/video-bps) (nle/export-profile p))))
   (is (= "video/webm;codecs=vp9,opus"
          (:profile/mime (nle/export-profile (assoc p :project/export-profile :master))))))
+(deftest project-authoritative-delivery-loudness
+  (let [configured (-> p
+                       (nle/set-delivery-audio :delivery/target-lufs -40)
+                       (nle/set-delivery-audio :delivery/sample-peak-ceiling-db 2))]
+    (is (= [-30.0 0.0]
+           ((juxt :delivery/target-lufs :delivery/sample-peak-ceiling-db)
+            (:project/delivery-audio configured))))
+    (is (< (abs (- -20.691 (nle/integrated-lufs [0.01 0.01 0.0]))) 0.001))
+    (is (= -2.0 (nle/normalization-gain-db -20.0 -0.5 -14.0 -2.5)))
+    (is (= 6.0 (nle/normalization-gain-db -20.0 -10.0 -14.0 -1.0)))
+    (is (empty? (nle/validate-project configured)))
+    (is (= [:invalid-delivery-audio]
+           (nle/validate-project (assoc-in configured [:project/delivery-audio :delivery/target-lufs] 1))))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))

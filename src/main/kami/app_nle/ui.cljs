@@ -7,7 +7,7 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
@@ -408,21 +408,38 @@
             low-b (.createBiquadFilter ctx) mid-b (.createBiquadFilter ctx) high-b (.createBiquadFilter ctx)
             master-low (.createBiquadFilter ctx) master-mid (.createBiquadFilter ctx) master-high (.createBiquadFilter ctx)
             gain-a (.createGain ctx) gain-b (.createGain ctx) master (.createGain ctx) analyser (.createAnalyser ctx)
+            loudness-high-pass (.createBiquadFilter ctx) loudness-shelf (.createBiquadFilter ctx)
+            loudness-splitter (.createChannelSplitter ctx 2)
+            loudness-left (.createAnalyser ctx) loudness-right (.createAnalyser ctx)
+            peak-splitter (.createChannelSplitter ctx 2) peak-left (.createAnalyser ctx) peak-right (.createAnalyser ctx)
+            measurement-sink (.createGain ctx)
             destination (.createMediaStreamDestination ctx)]
         (configure-eq-nodes! low-a mid-a high-a) (configure-eq-nodes! low-b mid-b high-b)
         (configure-eq-nodes! master-low master-mid master-high)
         (set! (.. gain-a -gain -value) 1) (set! (.. gain-b -gain -value) 0)
-        (set! (.. master -gain -value) (:master-gain @state)) (set! (.-fftSize analyser) 512)
+        (set! (.. master -gain -value) (or (get-in @state [:project :project/master-gain]) 0.9))
+        (doseq [node [analyser loudness-left loudness-right peak-left peak-right]] (set! (.-fftSize node) 512))
+        (set! (.-type loudness-high-pass) "highpass") (set! (.. loudness-high-pass -frequency -value) 38)
+        (set! (.. loudness-high-pass -Q -value) 0.5)
+        (set! (.-type loudness-shelf) "highshelf") (set! (.. loudness-shelf -frequency -value) 1682)
+        (set! (.. loudness-shelf -gain -value) 4)
+        (set! (.. measurement-sink -gain -value) 0)
         (.connect source-a low-a) (.connect low-a mid-a) (.connect mid-a high-a) (.connect high-a gain-a)
         (.connect source-b low-b) (.connect low-b mid-b) (.connect mid-b high-b) (.connect high-b gain-b)
         (.connect gain-a master-low) (.connect gain-b master-low)
         (.connect master-low master-mid) (.connect master-mid master-high) (.connect master-high master) (.connect master analyser)
         (.connect analyser destination) (.connect analyser (.-destination ctx))
+        (.connect master loudness-high-pass) (.connect loudness-high-pass loudness-shelf) (.connect loudness-shelf loudness-splitter)
+        (.connect loudness-splitter loudness-left 0) (.connect loudness-splitter loudness-right 1)
+        (.connect master peak-splitter) (.connect peak-splitter peak-left 0) (.connect peak-splitter peak-right 1)
+        (doseq [node [loudness-left loudness-right peak-left peak-right]] (.connect node measurement-sink))
+        (.connect measurement-sink (.-destination ctx))
         (let [runtime {:context ctx :destination destination :node-a @video-a-node :node-b @video-b-node
                        :gain-a gain-a :gain-b gain-b :eq-a {:low low-a :mid mid-a :high high-a}
                        :eq-b {:low low-b :mid mid-b :high high-b}
                        :master-eq {:low master-low :mid master-mid :high master-high}
-                       :master-input master-low :master master :analyser analyser}]
+                       :master-input master-low :master master :analyser analyser
+                       :loudness-analysers [loudness-left loudness-right] :peak-analysers [peak-left peak-right]}]
           (apply-eq! (:master-eq runtime) (get-in @state [:project :project/master-eq]))
           (reset! export-audio runtime)))))
 (defn gain-for-video [video]
@@ -485,7 +502,7 @@
           (.start source start-at offset duration)
           (swap! lane-audio-runtime conj {:source source :nodes [source low mid high automation-gain fade-gain]}))))))
 (defn set-master-gain! [gain]
-  (swap! state assoc :master-gain gain)
+  (swap! state assoc-in [:project :project/master-gain] (max 0 (min 2 gain)))
   (when-let [master (:master @export-audio)] (set! (.. master -gain -value) gain)))
 (defn set-primary-audio! [segment]
   (when @export-audio
@@ -553,23 +570,67 @@
               )))))
 (defn play-segments! [segments]
   (-> (prepare-video! (primary-video) (first segments))
-      (.then #(do (when (:exporting? @state) (schedule-audio-lanes! 0))
+      (.then #(do (when (or (:exporting? @state) (:analyzing-delivery? @state)) (schedule-audio-lanes! 0))
                   (play-timeline-from! segments 0 0)))))
-(defn export-webm! []
+(defn analyser-power [analyser]
+  (let [samples (js/Float32Array. (.-fftSize analyser))]
+    (.getFloatTimeDomainData analyser samples)
+    (/ (reduce (fn [sum value] (+ sum (* value value))) 0 (array-seq samples)) (.-length samples))))
+(defn analyser-peak [analyser]
+  (let [samples (js/Float32Array. (.-fftSize analyser))]
+    (.getFloatTimeDomainData analyser samples)
+    (reduce (fn [peak value] (max peak (js/Math.abs value))) 0 (array-seq samples))))
+(defn sample-delivery-block [loudness-analysers peak-analysers]
+  {:power (reduce + (map analyser-power loudness-analysers))
+   :peak (reduce max 0 (map analyser-peak peak-analysers))})
+(defn analyze-delivery! []
+  (let [segments (nle/render-segments (:project @state))
+        {:keys [context loudness-analysers peak-analysers master]} (ensure-export-audio!)
+        blocks (atom []) peak (atom 0) timer (atom nil)
+        base-gain (or (get-in @state [:project :project/master-gain]) 0.9)
+        settings (nle/delivery-audio (:project @state))]
+    (.resume context) (sync-master-eq!) (set! (.. master -gain -value) base-gain)
+    (swap! state assoc :analyzing-delivery? true :playing? true :delivery-report nil)
+    (reset! timer (js/setInterval
+                   (fn [] (let [{:keys [power] block-peak :peak} (sample-delivery-block loudness-analysers peak-analysers)]
+                            (swap! blocks conj power) (swap! peak max block-peak))) 100))
+    (-> (play-segments! segments)
+        (.then (fn [_]
+                 (let [lufs (nle/integrated-lufs @blocks)
+                       peak-db (if (pos? @peak) (* 20 (js/Math.log10 @peak)) -96.0)
+                       gain-db (nle/normalization-gain-db lufs peak-db
+                                                       (:delivery/target-lufs settings)
+                                                       (:delivery/sample-peak-ceiling-db settings))
+                       report {:loudness/lufs lufs :sample-peak/dbfs peak-db
+                               :normalization/gain-db gain-db
+                               :delivery/lufs (+ lufs gain-db)
+                               :delivery/sample-peak-dbfs (+ peak-db gain-db)}]
+                   (swap! state assoc :delivery-report report) report)))
+        (.finally (fn [] (when @timer (js/clearInterval @timer)) (stop-lane-audio!)
+                    (swap! state assoc :analyzing-delivery? false :playing? false))))))
+(defn record-webm! [gain-db]
   (let [segments (nle/render-segments (:project @state)) audio-segments (nle/audio-segments (:project @state))]
     (when (and (seq segments) (every? #(get-in @state [:assets (:segment/source-id %) :url]) segments)
                (every? #(get-in @state [:audio-buffers (:segment/source-id %)]) audio-segments))
       (let [stream (.captureStream @canvas-node (get-in @state [:project :project/fps]))
             {:keys [context destination]} (ensure-export-audio!)
+            base-gain (or (get-in @state [:project :project/master-gain]) 0.9)
+            delivery-gain (* base-gain (js/Math.pow 10 (/ gain-db 20)))
             audio-track (first (array-seq (.getAudioTracks (.-stream destination))))
             _ (.addTrack stream audio-track)
             recorder (js/MediaRecorder. stream (recorder-options (:project @state))) chunks (array)]
-        (.resume context) (sync-master-eq!) (set-master-gain! (:master-gain @state)) (set-primary-audio! (first segments)) (swap! state assoc :exporting? true :playing? true)
+        (.resume context) (sync-master-eq!) (set! (.. (:master @export-audio) -gain -value) delivery-gain)
+        (set-primary-audio! (first segments)) (swap! state assoc :exporting? true :playing? true)
         (set! (.-ondataavailable recorder) #(when (pos? (.. % -data -size)) (.push chunks (.-data %))))
         (set! (.-onstop recorder) #(do (stop-lane-audio!) (download-blob! (js/Blob. chunks #js {:type "video/webm"})) (swap! state dissoc :export-segment) (swap! state assoc :exporting? false :playing? false)))
         (.start recorder 250)
         (-> (play-segments! segments) (.then #(.stop recorder))
             (.catch (fn [error] (js/console.error error) (.stop recorder))))))))
+(defn export-webm! []
+  (if (:delivery/normalize? (nle/delivery-audio (:project @state)))
+    (-> (analyze-delivery!) (.then (fn [report] (record-webm! (:normalization/gain-db report))))
+        (.catch #(swap! state assoc :project-error (str "Delivery analysis failed: " (.-message %)))))
+    (record-webm! 0)))
 (declare move-trim! finish-trim! cancel-trim!)
 (defn remove-trim-listeners! []
   (.removeEventListener js/window "pointermove" move-trim!)
@@ -645,6 +706,7 @@
 (defn app [] (let [{:keys [frame playing? selected decoded? assets effect exporting?]} @state
                     project (or (:trim-preview @state) (:project @state))
                     total (max 300 (nle/duration-frames project)) fps (:project/fps project)
+                    delivery (nle/delivery-audio project)
                     missing (nle/missing-asset-ids project (keys assets))]
  [:main [:header [:div [:small "KOTOBA-LANG / VIDEO"] [:h1 "KAMI NLE"]] [:div.transport [:button.primary {:on-click toggle-play! :disabled (not decoded?)} (if playing? "❚❚ Pause" "▶ Play decoded media")] [:output (nle/timecode frame fps)]]]
   [:section.workspace [:aside [:h2 "Project bin"] [:label.import "Import / relink V1 videos" [:input {:type "file" :accept "video/*" :multiple true :aria-label "Import or relink NLE videos" :on-change load-media!}]]
@@ -703,7 +765,7 @@
         [:button {:on-click #(swap! state update :project nle/slip-clip (:clip/id clip) 5)} "Slip +5"]
         (when-let [right (next-video-clip project (:clip/id clip))]
           [:button {:on-click #(swap! state update :project nle/roll-cut (:clip/id clip) (:clip/id right) 5)} "Roll +5"])]] )
-    [:label "Master audio" [:input {:type "range" :min 0 :max 1.5 :step 0.05 :value (:master-gain @state) :aria-label "Master audio gain"
+    [:label "Master audio" [:input {:type "range" :min 0 :max 1.5 :step 0.05 :value (or (:project/master-gain project) 0.9) :aria-label "Master audio gain"
                                      :on-change #(set-master-gain! (js/parseFloat (.. % -target -value)))}]]
     (for [[band label] [[:low-db "Master low EQ"] [:mid-db "Master mid EQ"] [:high-db "Master high EQ"]]]
       ^{:key band} [:label label [:input {:type "range" :min -12 :max 12 :step 0.5
@@ -713,8 +775,30 @@
     [:label "Export preset" [:select {:value (name (:project/export-profile project)) :aria-label "Export preset"
                                        :on-change #(swap! state assoc-in [:project :project/export-profile] (keyword (.. % -target -value)))}
                               (for [[id profile] nle/export-profiles] ^{:key id} [:option {:value (name id)} (:profile/name profile)])]]
+    [:label "Normalize delivery" [:input {:type "checkbox"
+                                            :checked (:delivery/normalize? delivery)
+                                            :aria-label "Normalize delivery audio"
+                                            :on-change #(swap! state update :project nle/set-delivery-audio :delivery/normalize? (.. % -target -checked))}]]
+    [:label "Delivery LUFS" [:input {:type "number" :min -30 :max -5 :step 1
+                                       :value (:delivery/target-lufs delivery)
+                                       :aria-label "Delivery target LUFS"
+                                       :on-change #(swap! state update :project nle/set-delivery-audio :delivery/target-lufs
+                                                          (js/parseFloat (.. % -target -value)))}]]
+    [:label "Sample peak ceiling" [:input {:type "number" :min -12 :max 0 :step 0.5
+                                             :value (:delivery/sample-peak-ceiling-db delivery)
+                                             :aria-label "Delivery sample peak ceiling dBFS"
+                                             :on-change #(swap! state update :project nle/set-delivery-audio :delivery/sample-peak-ceiling-db
+                                                                (js/parseFloat (.. % -target -value)))}]]
     [:meter {:min -60 :max 0 :value (max -60 (:audio-meter-db @state)) :title (str (.toFixed (:audio-meter-db @state) 1) " dBFS")}]
-    [:button {:on-click export-webm! :disabled (or (not decoded?) exporting?)} (if exporting? "Encoding WebM…" "Export WebM")]
+    [:button {:on-click analyze-delivery! :disabled (or (not decoded?) exporting? (:analyzing-delivery? @state))}
+     (if (:analyzing-delivery? @state) "Analyzing delivery…" "Analyze delivery")]
+    (when-let [report (:delivery-report @state)]
+      [:output {:aria-label "Delivery loudness report"}
+       (str (.toFixed (:loudness/lufs report) 1) " LUFS • "
+            (.toFixed (:sample-peak/dbfs report) 1) " dBFS • gain "
+            (.toFixed (:normalization/gain-db report) 1) " dB")])
+    [:button {:on-click export-webm! :disabled (or (not decoded?) exporting? (:analyzing-delivery? @state))}
+     (cond exporting? "Encoding WebM…" (:analyzing-delivery? @state) "Preflighting audio…" :else "Export WebM")]
     [:button {:on-click download-project!} "Save project EDN"]
     [:label "Open project EDN" [:input {:type "file" :accept ".edn,application/edn" :aria-label "Open NLE project EDN" :on-change load-project!}]]
     [:button {:on-click export-package!} "Package project + media"]

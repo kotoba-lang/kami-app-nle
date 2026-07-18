@@ -27,13 +27,41 @@
 (defn media-url-key [proxy-preview? exporting? asset]
   (if (and proxy-preview? (not exporting?) (:proxy-url asset)) :proxy-url :url))
 (def flat-eq {:low-db 0.0 :mid-db 0.0 :high-db 0.0})
+(def default-delivery-audio {:delivery/normalize? true :delivery/target-lufs -14.0
+                             :delivery/sample-peak-ceiling-db -1.0})
 (defn clamp-db [db] (max -12.0 (min 12.0 (or db 0.0))))
 (defn normalize-eq [eq]
   {:low-db (clamp-db (:low-db eq)) :mid-db (clamp-db (:mid-db eq)) :high-db (clamp-db (:high-db eq))})
 (defn valid-eq? [eq]
   (and (map? eq) (every? #(and (number? %) (<= -12 % 12)) ((juxt :low-db :mid-db :high-db) eq))))
 (defn project [m] (merge {:project/schema schema :project/fps 30 :project/export-profile :review
-                           :project/master-eq flat-eq :project/assets {} :project/tracks []} m))
+                           :project/master-eq flat-eq :project/master-gain 0.9
+                           :project/delivery-audio default-delivery-audio
+                           :project/assets {} :project/tracks []} m))
+(defn delivery-audio [p] (merge default-delivery-audio (:project/delivery-audio p)))
+(defn clamp [minimum maximum value] (max minimum (min maximum value)))
+(defn set-delivery-audio [p key value]
+  (let [p (assoc p :project/delivery-audio (delivery-audio p))]
+    (case key
+      :delivery/normalize? (assoc-in p [:project/delivery-audio key] (boolean value))
+      :delivery/target-lufs (assoc-in p [:project/delivery-audio key] (clamp -30.0 -5.0 value))
+      :delivery/sample-peak-ceiling-db (assoc-in p [:project/delivery-audio key] (clamp -12.0 0.0 value))
+      p)))
+(defn power->lufs [power]
+  (if (pos? power)
+    (+ -0.691 (* 10 (#?(:clj Math/log10 :cljs js/Math.log10) power)))
+    -96.0))
+(defn integrated-lufs [block-powers]
+  (let [absolute (filter #(> (power->lufs %) -70) block-powers)]
+    (if (empty? absolute) -96.0
+        (let [preliminary (power->lufs (/ (reduce + absolute) (count absolute)))
+              relative-gate (- preliminary 10)
+              gated (filter #(> (power->lufs %) relative-gate) absolute)]
+          (if (seq gated) (power->lufs (/ (reduce + gated) (count gated))) -96.0)))))
+(defn normalization-gain-db [measured-lufs sample-peak-db target-lufs ceiling-db]
+  (if (<= measured-lufs -95)
+    0.0
+    (min (- target-lufs measured-lufs) (- ceiling-db sample-peak-db))))
 (defn register-asset
   ([p asset-id name] (register-asset p asset-id name nil))
   ([p asset-id name sha256]
@@ -201,6 +229,12 @@
 (declare audio-clips)
 (defn validate-project [p] (vec (concat (when-not (= schema (:project/schema p)) [:unsupported-schema]) (when-not (pos-int? (:project/fps p)) [:invalid-fps])
   (when (and (:project/master-eq p) (not (valid-eq? (:project/master-eq p)))) [:invalid-master-eq])
+  (when (and (:project/master-gain p) (not (<= 0 (:project/master-gain p) 2))) [:invalid-master-gain])
+  (when-let [delivery (:project/delivery-audio p)]
+    (when-not (and (boolean? (:delivery/normalize? delivery))
+                   (<= -30 (:delivery/target-lufs delivery) -5)
+                   (<= -12 (:delivery/sample-peak-ceiling-db delivery) 0))
+      [:invalid-delivery-audio]))
   (for [c (mapcat :track/clips (:project/tracks p)) :when (or (neg? (:clip/start-frame c)) (>= (:clip/in-frame c) (:clip/out-frame c)))] [:invalid-clip (:clip/id c)])
   (for [c (mapcat :track/clips (:project/tracks p)) :when (and (:clip/audio-eq c) (not (valid-eq? (:clip/audio-eq c))))] [:invalid-clip-eq (:clip/id c)])
   (for [c (audio-clips p) :when (or (neg? (or (:clip/fade-in-sec c) 0)) (neg? (or (:clip/fade-out-sec c) 0)))] [:invalid-audio-fade (:clip/id c)])
