@@ -173,8 +173,9 @@
     (is (= 15 (:caption/start-frame english)))
     (is (= 75 (:caption/end-frame english)))
     (is (= "First line\nSecond line" (:caption/text english)))
+    (is (= :draft (nle/caption-status english)))
     (is (= ["en" "ja"] (nle/caption-languages imported)))
-    (is (str/includes? (nle/webvtt imported "en") "00:00:00.500 --> 00:00:02.500"))
+    (is (not (str/includes? (nle/webvtt imported "en") "00:00:00.500 --> 00:00:02.500")))
     (is (str/includes? (nle/webvtt imported "ja") "残す"))
     (is (empty? (nle/validate-project imported)))
     (is (nil? (nle/import-webvtt base "WEBVTT\n\nbroken" "en")))))
@@ -188,10 +189,25 @@
     (is (= ["en" "ja"] (nle/caption-languages japanese)))
     (is (= ["First" "Second"] (mapv :caption/text (filter #(= "ja" (nle/caption-language %))
                                                             (:project/captions japanese)))))
+    (is (= [:draft :draft] (mapv nle/caption-status (filter #(= "ja" (nle/caption-language %))
+                                                             (:project/captions japanese)))))
     (is (= ["translation:ja:1"] (mapv :caption/id (filter #(= "ja" (nle/caption-language %))
                                                             (:project/captions deleted)))))
     (is (= japanese (nle/clone-caption-language japanese "ja" "ja")))
     (is (empty? (nle/validate-project deleted)))))
+(deftest only-approved-captions-reach-preview-and-delivery
+  (let [captions (-> p
+                     (nle/add-caption "approved" 0 60 "Ship" "en" nle/default-caption-style)
+                     (nle/add-caption "draft" 0 60 "Do not ship" "en" nle/default-caption-style)
+                     (nle/set-caption-status "draft" :draft))
+        approved-draft (nle/set-caption-status captions "draft" :approved)]
+    (is (= ["approved"] (mapv :caption/id (nle/captions-at-frame captions 30))))
+    (is (str/includes? (nle/webvtt captions) "Ship"))
+    (is (not (str/includes? (nle/webvtt captions) "Do not ship")))
+    (is (= ["approved" "draft"] (mapv :caption/id (nle/captions-at-frame approved-draft 30))))
+    (is (empty? (nle/validate-project captions)))
+    (is (= [[:invalid-caption "draft"]]
+           (nle/validate-project (assoc-in captions [:project/captions 1 :caption/status] :rejected))))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))

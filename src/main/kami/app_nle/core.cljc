@@ -95,6 +95,10 @@
    :caption/align (if (contains? #{:left :center :right} (:caption/align style)) (:caption/align style) :center)
    :caption/font-scale (clamp 0.5 2.0 (or (:caption/font-scale style) 1.0))})
 (def language-pattern #"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+(def caption-statuses #{:draft :review :approved})
+(defn caption-status [caption] (if (contains? caption-statuses (:caption/status caption))
+                                 (:caption/status caption) :approved))
+(defn caption-deliverable? [caption] (= :approved (caption-status caption)))
 (defn normalize-language [language] (if (and (string? language) (re-matches language-pattern language)) language "en"))
 (defn caption-language [caption] (normalize-language (:caption/language caption)))
 (defn caption-languages [p] (->> (:project/captions p) (map caption-language) set sort vec))
@@ -103,6 +107,12 @@
     (assoc p :project/caption-language language) p))
 (defn remove-caption [p caption-id]
   (update p :project/captions #(vec (remove (fn [caption] (= caption-id (:caption/id caption))) %))))
+(defn set-caption-status [p caption-id status]
+  (if (contains? caption-statuses status)
+    (update p :project/captions
+            #(mapv (fn [caption] (if (= caption-id (:caption/id caption))
+                                   (assoc caption :caption/status status) caption)) %))
+    p))
 (defn clone-caption-language [p source-language target-language]
   (let [source (normalize-language source-language) target (normalize-language target-language)
         source-captions (filter #(= source (caption-language %)) (:project/captions p))]
@@ -111,7 +121,7 @@
       (let [retained (remove #(= target (caption-language %)) (:project/captions p))
             cloned (map-indexed (fn [index caption]
                                   (assoc caption :caption/id (str "translation:" target ":" index)
-                                                 :caption/language target)) source-captions)]
+                                                 :caption/language target :caption/status :draft)) source-captions)]
         (assoc p :project/captions (->> (concat retained cloned)
                                         (sort-by (juxt :caption/start-frame :caption/id)) vec)
                  :project/caption-language target))
@@ -144,7 +154,8 @@
                 (sort-by (juxt :caption/start-frame :caption/id)) vec)))
 (defn captions-at-frame [p frame]
   (->> (:project/captions p)
-       (filter #(and (= (normalize-language (:project/caption-language p)) (caption-language %))
+       (filter #(and (caption-deliverable? %)
+                     (= (normalize-language (:project/caption-language p)) (caption-language %))
                      (<= (:caption/start-frame %) frame (dec (:caption/end-frame %))))) vec))
 (declare pad2)
 (defn- pad3 [n] (cond (< n 10) (str "00" n) (< n 100) (str "0" n) :else (str n)))
@@ -178,7 +189,8 @@
                  (when (and start end (< start end) (not (str/blank? content)))
                    {:caption/id (str "vtt:" (normalize-language language) ":" index)
                     :caption/start-frame start :caption/end-frame end :caption/text content
-                    :caption/language (normalize-language language) :caption/style default-caption-style})))
+                    :caption/language (normalize-language language) :caption/status :draft
+                    :caption/style default-caption-style})))
              cue-blocks)]
         (when (and (seq cues) (every? some? cues)) (vec cues))))))
 (defn import-webvtt [p text language]
@@ -198,8 +210,10 @@
                              (frame->vtt-time (:caption/start-frame caption) (:project/fps p)) " --> "
                              (frame->vtt-time (:caption/end-frame caption) (:project/fps p)) "\n"
                              (:caption/text caption)))
-                      (filter #(= (normalize-language language) (caption-language %)) (:project/captions p))))
-       (when (seq (filter #(= (normalize-language language) (caption-language %)) (:project/captions p))) "\n"))))
+                      (filter #(and (caption-deliverable? %)
+                                    (= (normalize-language language) (caption-language %))) (:project/captions p))))
+       (when (seq (filter #(and (caption-deliverable? %)
+                                (= (normalize-language language) (caption-language %))) (:project/captions p))) "\n"))))
 (defn register-asset
   ([p asset-id name] (register-asset p asset-id name nil))
   ([p asset-id name sha256]
@@ -386,6 +400,7 @@
                   (not (string? (:caption/text caption))) (str/blank? (:caption/text caption))
                   (and (:caption/language caption)
                        (not (re-matches language-pattern (:caption/language caption))))
+                  (and (:caption/status caption) (not (contains? caption-statuses (:caption/status caption))))
                   (and (:caption/style caption)
                        (not= (:caption/style caption) (normalize-caption-style (:caption/style caption))))
                   (neg? (:caption/start-frame caption))
