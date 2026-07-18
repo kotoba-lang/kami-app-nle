@@ -2,7 +2,7 @@
 
 EDN-native browser non-linear video editor for `kotoba-lang`. It owns frame/timecode transport, video and audio lanes, clip selection, trim/split/move semantics, project bin, media effects, and master export. It does not own music composition or 3D character authoring.
 
-The production path is browser-native: an imported local video is decoded by `HTMLVideoElement`, rendered frame-by-frame through a filtered canvas, and encoded with its audio track to a downloadable WebM through `MediaRecorder`.
+The production path is browser-native: multiple imported videos are bound to timeline clips through `:clip/source-id`. Preview resolves the active clip at the playhead, while export consumes the pure `render-segments` plan in timeline order, honoring each clip's source-in and duration. Frames pass through the filtered canvas and mixed source audio is encoded to downloadable WebM through `MediaRecorder`.
 
 ## Run
 
@@ -20,4 +20,4 @@ npm run check
 npm run release
 ```
 
-Maturity: **逍遥** — real media decode, canvas effects, playback, and WebM export are implemented. Multi-clip source relinking, transitions in the rendered master, and codec/container selection remain follow-up scope.
+Maturity: **逍遥** — multi-asset timeline binding, real decode, canvas effects, and timeline-ordered WebM export are implemented. Gap/overlap policy, rendered transitions, trim handles, proxies, color management, meters, and codec/container selection remain follow-up scope.
