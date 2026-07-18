@@ -208,6 +208,24 @@
     (is (empty? (nle/validate-project captions)))
     (is (= [[:invalid-caption "draft"]]
            (nle/validate-project (assoc-in captions [:project/captions 1 :caption/status] :rejected))))))
+(deftest caption-review-notes-and-status-history-are-auditable
+  (let [captioned (nle/add-caption p "cue" 0 60 "Review me" "en" nle/default-caption-style)
+        reviewed (-> captioned
+                     (nle/add-caption-review-note "cue" "note-1" "mika" "Timing checked" 1000)
+                     (nle/set-caption-status "cue" :review "mika" 1100)
+                     (nle/set-caption-status "cue" :approved "lead" 1200))
+        cue (first (:project/captions reviewed))]
+    (is (= [{:review/id "note-1" :review/author "mika" :review/text "Timing checked" :review/at 1000}]
+           (:caption/review-notes cue)))
+    (is (= [{:status/from :approved :status/to :review :status/actor "mika" :status/at 1100}
+            {:status/from :review :status/to :approved :status/actor "lead" :status/at 1200}]
+           (:caption/status-history cue)))
+    (is (empty? (nle/validate-project reviewed)))
+    (is (= reviewed (nle/add-caption-review-note reviewed "cue" "note-1" "mika" "duplicate" 1300)))
+    (is (= [[:invalid-caption "cue"]]
+           (nle/validate-project (assoc-in reviewed [:project/captions 0 :caption/review-notes 0 :review/text] ""))))
+    (is (= [[:invalid-caption "cue"]]
+           (nle/validate-project (assoc-in reviewed [:project/captions 0 :caption/status-history 1 :status/at] 1000))))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))
