@@ -318,6 +318,28 @@
 (def ttml-namespace "http://www.w3.org/ns/ttml")
 (def ttml-parameter-namespace "http://www.w3.org/ns/ttml#parameter")
 (def ttml-styling-namespace "http://www.w3.org/ns/ttml#styling")
+(defn imsc-element-by-id [document id]
+  (when (seq id)
+    (or (.getElementById document id)
+        (first (filter #(= id (.getAttribute % "xml:id"))
+                       (array-seq (.getElementsByTagName document "*")))))))
+(defn imsc-referenced-styles [document node]
+  (->> (str/split (or (.getAttribute node "style") "") #"\s+")
+       (keep #(imsc-element-by-id document %)) vec))
+(defn imsc-style-value [document node local-name]
+  (let [region (imsc-element-by-id document (.getAttribute node "region"))
+        candidates (concat [node] (imsc-referenced-styles document node)
+                           (when region [region]) (when region (imsc-referenced-styles document region)))]
+    (some (fn [candidate]
+            (let [value (.getAttributeNS candidate ttml-styling-namespace local-name)]
+              (when (seq value) value))) candidates)))
+(defn imsc-caption-position [document node]
+  (let [region-id (.getAttribute node "region")
+        region (imsc-element-by-id document region-id)
+        origin (when region (imsc-style-value document region "origin"))
+        y-token (second (str/split (or origin "") #"\s+"))
+        y (when (and y-token (str/ends-with? y-token "%")) (js/parseFloat y-token))]
+    (if (or (= region-id "top") (and (number? y) (< y 50))) :top :bottom)))
 (defn imsc-node-text [node]
   (apply str
          (map (fn [child]
@@ -340,12 +362,11 @@
         (let [cues (mapv (fn [node]
                            (let [start (nle/imsc-time->frame (.getAttribute node "begin") fps)
                                  end (nle/imsc-time->frame (.getAttribute node "end") fps)
-                                 region (.getAttribute node "region")
-                                 align (.getAttributeNS node ttml-styling-namespace "textAlign")
-                                 font-size (.getAttributeNS node ttml-styling-namespace "fontSize")]
+                                 align (imsc-style-value document node "textAlign")
+                                 font-size (imsc-style-value document node "fontSize")]
                              {:caption/start-frame start :caption/end-frame end
                               :caption/text (str/trim (imsc-node-text node))
-                              :caption/style {:caption/position (keyword (if (= region "top") "top" "bottom"))
+                              :caption/style {:caption/position (imsc-caption-position document node)
                                               :caption/align (keyword (if (#{"left" "center" "right"} align) align "center"))
                                               :caption/font-scale (if (and font-size (str/ends-with? font-size "%"))
                                                                     (/ (js/parseFloat font-size) 100) 1.0)}})) nodes)]
