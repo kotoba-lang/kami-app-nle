@@ -1,5 +1,7 @@
 # KAMI NLE
 
+Spline intervals include an accessible SVG curve canvas with the authored cubic Bézier path and both control handles. Pointer edits select the nearest handle, map canvas coordinates into bounded timing/value coordinates, preserve `x1 <= x2`, and commit through the same validated project operation as numeric controls.
+
 Caption cards expose project-authoritative interval editing for linear, discrete, and spline animation. Spline intervals provide four bounded Bézier controls with linked `x1 <= x2` UI constraints; every edit is revalidated before persistence and immediately drives preview and production evaluation.
 
 TTML animation ingest accepts bounded multi-keyframe `values`, strictly increasing `keyTimes`, and one validated `keySplines` curve per interval. Up to 17 authored values become 16 project-authoritative intervals evaluated by the same preview/production path and emitted as lossless equivalent IMSC animation segments.

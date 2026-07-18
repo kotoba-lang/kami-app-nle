@@ -1096,6 +1096,27 @@
     (swap! state update :project nle/set-audio-gain-automation (:clip/id clip)
            [{:sec 0 :gain (if (= endpoint :start) gain start)}
             {:sec duration :gain (if (= endpoint :end) gain end)}])))
+(defn animation-curve-canvas [caption animation-index animation]
+  (let [[x1 y1 x2 y2] (:animation/key-spline animation)
+        width 120 height 80
+        path (str "M 0 " height " C " (* width x1) " " (* height (- 1 y1)) ", "
+                  (* width x2) " " (* height (- 1 y2)) ", " width " 0")]
+    [:svg {:viewBox (str "0 0 " width " " height) :width width :height height
+           :aria-label (str (:caption/id caption) " animation " animation-index " curve canvas")
+           :on-pointer-down
+           #(let [rect (.getBoundingClientRect (.-currentTarget %))
+                  x (max 0 (min 1 (/ (- (.-clientX %) (.-left rect)) (.-width rect))))
+                  y (max 0 (min 1 (- 1 (/ (- (.-clientY %) (.-top rect)) (.-height rect)))))
+                  point (if (< (js/Math.abs (- x x1)) (js/Math.abs (- x x2))) 0 2)
+                  values (if (zero? point)
+                           [(min x x2) y x2 y2]
+                           [x1 y1 (max x x1) y])]
+              (swap! state update :project nle/edit-caption-animation (:caption/id caption)
+                     animation-index {:animation/key-spline values}))}
+     [:path {:d path :fill "none" :stroke "currentColor"}]
+     [:circle {:cx (* width x1) :cy (* height (- 1 y1)) :r 4}]
+     [:circle {:cx (* width x2) :cy (* height (- 1 y2)) :r 4}]]))
+
 (defn app [] (let [{:keys [frame playing? selected decoded? assets effect exporting?]} @state
                     project (or (:trim-preview @state) (:project @state))
                     total (max 300 (nle/duration-frames project)) fps (:project/fps project)
@@ -1211,9 +1232,11 @@
               [:option {:value "linear"} "Linear"] [:option {:value "discrete"} "Discrete"]
               [:option {:value "spline"} "Spline"]]
              (when (= :spline (:animation/interpolation animation))
-               (for [[point value] (map-indexed vector (:animation/key-spline animation))]
-                 ^{:key point}
-                 [:input {:type "number"
+               [:span
+                [animation-curve-canvas caption index animation]
+                (for [[point value] (map-indexed vector (:animation/key-spline animation))]
+                  ^{:key point}
+                  [:input {:type "number"
                           :min (if (= point 2) (first (:animation/key-spline animation)) 0)
                           :max (if (zero? point) (nth (:animation/key-spline animation) 2) 1)
                           :step 0.01 :value value
@@ -1222,7 +1245,7 @@
                                              (:caption/id caption) index
                                              {:animation/key-spline
                                               (assoc (:animation/key-spline animation) point
-                                                     (js/parseFloat (.. % -target -value)))})}]))])])
+                                                     (js/parseFloat (.. % -target -value)))})}])])])])
        [:input {:value (nle/caption-language caption) :aria-label (str (:caption/id caption) " language")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
                                    {:caption/language (.. % -target -value)})}]
