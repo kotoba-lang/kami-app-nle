@@ -5,10 +5,17 @@
    :master {:profile/name "Master VP9" :profile/mime "video/webm;codecs=vp9,opus" :profile/video-bps 8000000 :profile/audio-bps 192000}
    :compact {:profile/name "Compact VP8" :profile/mime "video/webm;codecs=vp8,opus" :profile/video-bps 1000000 :profile/audio-bps 96000}})
 (defn project [m] (merge {:project/schema schema :project/fps 30 :project/export-profile :review :project/assets {} :project/tracks []} m))
-(defn register-asset [p asset-id name]
-  (assoc-in p [:project/assets asset-id] {:asset/name name}))
+(defn register-asset
+  ([p asset-id name] (register-asset p asset-id name nil))
+  ([p asset-id name sha256]
+   (assoc-in p [:project/assets asset-id] (cond-> {:asset/name name} sha256 (assoc :asset/sha256 sha256)))))
 (defn asset-id-by-name [p name]
   (some (fn [[asset-id asset]] (when (= name (:asset/name asset)) asset-id)) (:project/assets p)))
+(defn asset-id-by-signature [p {:keys [name sha256]}]
+  (or (when sha256 (some (fn [[asset-id asset]] (when (= sha256 (:asset/sha256 asset)) asset-id)) (:project/assets p)))
+      (asset-id-by-name p name)))
+(defn missing-asset-ids [p loaded-ids]
+  (->> (keys (:project/assets p)) (remove (set loaded-ids)) sort vec))
 (defn next-asset-id [p]
   (loop [index 0]
     (let [asset-id (str "asset:" index)]

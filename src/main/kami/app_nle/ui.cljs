@@ -10,6 +10,12 @@
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
 (def recovery-key "kami-app-nle/recovery/v1")
+(defn sha256-file! [file]
+  (-> (.arrayBuffer file)
+      (.then #(.digest (.-subtle js/crypto) "SHA-256" %))
+      (.then (fn [digest]
+               (apply str (map #(.padStart (.toString % 16) 2 "0")
+                               (array-seq (js/Uint8Array. digest))))))))
 (def filters {:none "none" :cinema "contrast(1.18) saturate(1.22)" :mono "grayscale(1) contrast(1.12)" :dream "saturate(1.35) brightness(1.08) blur(1px)"})
 (defn primary-video [] (if (= :a (:primary-slot @state)) @video-a-node @video-b-node))
 (defn secondary-video [] (if (= :a (:primary-slot @state)) @video-b-node @video-a-node))
@@ -44,13 +50,19 @@
 (defn seek-frame! [frame] (when-let [clip (nle/clip-at-frame (:project @state) frame)] (activate-source! (:clip/source-id clip) (+ (:clip/in-frame clip) (- frame (:clip/start-frame clip))))))
 (defn load-media! [e]
   (let [files (array-seq (.. e -target -files))]
-    (doseq [file files]
-      (let [source-id (or (nle/asset-id-by-name (:project @state) (.-name file)) (nle/next-asset-id (:project @state)))
-            url (js/URL.createObjectURL file)]
-        (when-let [old-url (get-in @state [:assets source-id :url])] (js/URL.revokeObjectURL old-url))
-        (swap! state (fn [s] (-> s (assoc-in [:assets source-id] {:name (.-name file) :url url})
-                                  (update :project nle/register-asset source-id (.-name file)))))))
-    (when (seq files) (seek-frame! (:frame @state)))))
+    (-> (reduce (fn [promise file]
+                  (.then promise
+                         (fn []
+                           (-> (sha256-file! file)
+                               (.then (fn [sha256]
+                                        (let [source-id (or (nle/asset-id-by-signature (:project @state) {:name (.-name file) :sha256 sha256})
+                                                            (nle/next-asset-id (:project @state)))
+                                              url (js/URL.createObjectURL file)]
+                                          (when-let [old-url (get-in @state [:assets source-id :url])] (js/URL.revokeObjectURL old-url))
+                                          (swap! state (fn [s] (-> s (assoc-in [:assets source-id] {:name (.-name file) :sha256 sha256 :url url})
+                                                                    (update :project nle/register-asset source-id (.-name file) sha256)))))))))))
+                (js/Promise.resolve true) files)
+        (.then #(when (seq files) (seek-frame! (:frame @state)))))))
 (defn media-ready! [] (let [v (primary-video) c @canvas-node] (set! (.-width c) (or (.-videoWidth v) 1280)) (set! (.-height c) (or (.-videoHeight v) 720)) (set! (.-currentTime v) (/ (:pending-source-frame @state) (get-in @state [:project :project/fps]))) (swap! state assoc :decoded? true) (draw-frame!)))
 (defn toggle-play! [] (when (:decoded? @state) (if (:playing? @state) (.pause (primary-video)) (.play (primary-video))) (swap! state update :playing? not)))
 (defn download-blob! [blob] (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")] (set! (.-href a) url) (set! (.-download a) "kami-nle-master.webm") (.click a) (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
@@ -196,7 +208,8 @@
 (defn edit-trim! [clip k value]
   (let [in-frame (if (= k :in) value (:clip/in-frame clip)) out-frame (if (= k :out) value (:clip/out-frame clip))]
     (swap! state update :project nle/trim-clip (:clip/id clip) in-frame out-frame)))
-(defn app [] (let [{:keys [project frame playing? selected decoded? assets effect exporting?]} @state total (max 300 (nle/duration-frames project)) fps (:project/fps project)]
+(defn app [] (let [{:keys [project frame playing? selected decoded? assets effect exporting?]} @state total (max 300 (nle/duration-frames project)) fps (:project/fps project)
+                    missing (nle/missing-asset-ids project (keys assets))]
  [:main [:header [:div [:small "KOTOBA-LANG / VIDEO"] [:h1 "KAMI NLE"]] [:div.transport [:button.primary {:on-click toggle-play! :disabled (not decoded?)} (if playing? "❚❚ Pause" "▶ Play decoded media")] [:output (nle/timecode frame fps)]]]
   [:section.workspace [:aside [:h2 "Project bin"] [:label.import "Import / relink V1 videos" [:input {:type "file" :accept "video/*" :multiple true :aria-label "Import or relink NLE videos" :on-change load-media!}]] (if (seq assets) (for [[id asset] assets] ^{:key id} [:div.asset (str "🎞 " id " • " (:name asset))]) [:div.asset "No media loaded"]) [:label "Effect" [:select {:value (name effect) :on-change #(swap! state assoc :effect (keyword (.. % -target -value)))} [:option {:value "none"} "None"] [:option {:value "cinema"} "Cinema"] [:option {:value "mono"} "Monochrome"] [:option {:value "dream"} "Dream"]]]
     (when-let [clip (selected-clip project selected)]
@@ -223,6 +236,7 @@
     [:button {:on-click #(js/navigator.clipboard.writeText (pr-str project))} "Copy project EDN"]]
    (when-let [error (:project-error @state)] [:aside [:strong (str "Project error: " error)]])
    (when (:recovered? @state) [:aside [:strong "Recovered autosaved project"]])
+   (when (seq missing) [:aside.missing-media [:strong (str "Missing media: " (count missing))] [:span (pr-str missing)]])
    [:div.monitor [:video {:ref #(reset! video-a-node %) :style {:display "none"} :plays-inline true :on-loaded-metadata media-ready! :on-pause #(swap! state assoc :playing? false)}]
     [:video {:ref #(reset! video-b-node %) :style {:display "none"} :plays-inline true}]
     [:div.frame [:span "PROGRAM"] [:strong (nle/timecode frame fps)] [:canvas {:ref #(reset! canvas-node %) :aria-label "Decoded video preview"}] (when-not decoded? [:div.scene "IMPORT VIDEO"])] [:div.tools [:button {:disabled (nil? selected) :on-click #(swap! state update :project nle/split-clip selected frame (str selected "-b"))} "Split at playhead"] [:span (str fps " fps • " total " frames • " (name effect))]]]]
