@@ -7,6 +7,7 @@
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
 (defonce state (r/atom {:project sample :frame 105 :playing? false :selected "wide" :assets {} :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false}))
 (defonce video-node (atom nil)) (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
+(defonce export-audio (atom nil))
 (def filters {:none "none" :cinema "contrast(1.18) saturate(1.22)" :mono "grayscale(1) contrast(1.12)" :dream "saturate(1.35) brightness(1.08) blur(1px)"})
 (defn draw-frame! [] (when (and @video-node @canvas-node) (let [v @video-node c @canvas-node ctx (.getContext c "2d")] (when (>= (.-readyState v) 2) (set! (.-filter ctx) (get filters (:effect @state) "none")) (.drawImage ctx v 0 0 (.-width c) (.-height c)) (swap! state assoc :frame (js/Math.floor (* (.-currentTime v) (get-in @state [:project :project/fps]))))) (js/requestAnimationFrame draw-frame!))))
 (defn activate-source! [source-id source-frame] (when-let [{:keys [url]} (get-in @state [:assets source-id])] (swap! state assoc :pending-source-frame source-frame :active-source source-id) (if (not= url (.-src @video-node)) (do (set! (.-src @video-node) url) (.load @video-node)) (set! (.-currentTime @video-node) (/ source-frame (get-in @state [:project :project/fps]))))))
@@ -15,7 +16,42 @@
 (defn media-ready! [] (let [v @video-node c @canvas-node] (set! (.-width c) (or (.-videoWidth v) 1280)) (set! (.-height c) (or (.-videoHeight v) 720)) (set! (.-currentTime v) (/ (:pending-source-frame @state) (get-in @state [:project :project/fps]))) (swap! state assoc :decoded? true) (draw-frame!)))
 (defn toggle-play! [] (when (:decoded? @state) (if (:playing? @state) (.pause @video-node) (.play @video-node)) (swap! state update :playing? not)))
 (defn download-blob! [blob] (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")] (set! (.-href a) url) (set! (.-download a) "kami-nle-master.webm") (.click a) (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
-(defn export-webm! [] (when (:decoded? @state) (let [stream (.captureStream @canvas-node (get-in @state [:project :project/fps])) source (when (.-captureStream @video-node) (.captureStream @video-node)) audio (when source (first (array-seq (.getAudioTracks source)))) _ (when audio (.addTrack stream audio)) recorder (js/MediaRecorder. stream #js {:mimeType "video/webm;codecs=vp8,opus"}) chunks (array)] (swap! state assoc :exporting? true) (set! (.-ondataavailable recorder) #(when (pos? (.. % -data -size)) (.push chunks (.-data %)))) (set! (.-onstop recorder) #(do (download-blob! (js/Blob. chunks #js {:type "video/webm"})) (swap! state assoc :exporting? false :playing? false))) (set! (.-onended @video-node) #(.stop recorder)) (set! (.-currentTime @video-node) 0) (.start recorder 250) (.play @video-node) (swap! state assoc :playing? true))))
+(defn ensure-export-audio! []
+  (or @export-audio
+      (let [Ctor (or (.-AudioContext js/window) (.-webkitAudioContext js/window)) ctx (new Ctor)
+            source (.createMediaElementSource ctx @video-node) destination (.createMediaStreamDestination ctx)]
+        (.connect source destination) (.connect source (.-destination ctx))
+        (reset! export-audio {:context ctx :destination destination}))))
+(defn play-segment! [segment]
+  (js/Promise.
+   (fn [resolve reject]
+     (if-let [url (get-in @state [:assets (:segment/source-id segment) :url])]
+       (let [video @video-node duration-ms (* 1000 (:segment/duration-sec segment))]
+         (set! (.-onerror video) #(reject (js/Error. (str "Cannot decode " (:segment/source-id segment)))))
+         (set! (.-onloadedmetadata video)
+               #(do (set! (.-currentTime video) (:segment/source-start-sec segment))
+                    (set! (.-onseeked video)
+                          (fn [] (set! (.-onseeked video) nil) (.play video)
+                            (js/setTimeout (fn [] (.pause video) (resolve true)) duration-ms)))))
+         (set! (.-src video) url) (.load video))
+       (reject (js/Error. (str "Missing asset " (:segment/source-id segment))))))))
+(defn play-segments! [segments]
+  (reduce (fn [promise segment] (.then promise #(play-segment! segment)))
+          (js/Promise.resolve true) segments))
+(defn export-webm! []
+  (let [segments (nle/render-segments (:project @state))]
+    (when (and (seq segments) (every? #(get-in @state [:assets (:segment/source-id %) :url]) segments))
+      (let [stream (.captureStream @canvas-node (get-in @state [:project :project/fps]))
+            {:keys [context destination]} (ensure-export-audio!)
+            audio-track (first (array-seq (.getAudioTracks (.-stream destination))))
+            _ (.addTrack stream audio-track)
+            recorder (js/MediaRecorder. stream #js {:mimeType "video/webm;codecs=vp8,opus"}) chunks (array)]
+        (.resume context) (swap! state assoc :exporting? true :playing? true)
+        (set! (.-ondataavailable recorder) #(when (pos? (.. % -data -size)) (.push chunks (.-data %))))
+        (set! (.-onstop recorder) #(do (download-blob! (js/Blob. chunks #js {:type "video/webm"})) (swap! state assoc :exporting? false :playing? false)))
+        (.start recorder 250)
+        (-> (play-segments! segments) (.then #(.stop recorder))
+            (.catch (fn [error] (js/console.error error) (.stop recorder))))))))
 (defn clip-view [c total] [:button.clip {:class (when (= (:selected @state) (:clip/id c)) "selected") :style {:left (str (* 100 (/ (:clip/start-frame c) total)) "%") :width (str (* 100 (/ (- (:clip/out-frame c) (:clip/in-frame c)) total)) "%") :background (:clip/color c)} :on-click #(swap! state assoc :selected (:clip/id c) :frame (:clip/start-frame c))} (:clip/name c)])
 (defn app [] (let [{:keys [project frame playing? selected decoded? assets effect exporting?]} @state total (max 300 (nle/duration-frames project)) fps (:project/fps project)]
  [:main [:header [:div [:small "KOTOBA-LANG / VIDEO"] [:h1 "KAMI NLE"]] [:div.transport [:button.primary {:on-click toggle-play! :disabled (not decoded?)} (if playing? "❚❚ Pause" "▶ Play decoded media")] [:output (nle/timecode frame fps)]]]
