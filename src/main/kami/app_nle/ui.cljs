@@ -858,6 +858,11 @@
        [:input {:value (nle/caption-language caption) :aria-label (str (:caption/id caption) " language")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
                                    {:caption/language (.. % -target -value)})}]
+       [:select {:value (name (nle/caption-status caption)) :aria-label (str (:caption/id caption) " status")
+                 :on-change #(swap! state update :project nle/set-caption-status (:caption/id caption)
+                                    (keyword (.. % -target -value)))}
+        [:option {:value "draft"} "Draft"] [:option {:value "review"} "In review"]
+        [:option {:value "approved"} "Approved"]]
        [:input {:type "number" :min 0 :value (:caption/start-frame caption)
                 :aria-label (str (:caption/id caption) " start frame")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
