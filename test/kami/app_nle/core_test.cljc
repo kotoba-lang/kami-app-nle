@@ -105,6 +105,18 @@
     (is (empty? (nle/validate-project configured)))
     (is (= [:invalid-delivery-audio]
            (nle/validate-project (assoc-in configured [:project/delivery-audio :delivery/target-lufs] 1))))))
+(deftest project-authoritative-color-pipeline
+  (let [configured (-> p
+                       (nle/set-color-pipeline :color/output-space :display-p3)
+                       (nle/set-color-pipeline :color/exposure-stops 8)
+                       (nle/set-color-pipeline :color/contrast -1)
+                       (nle/set-color-pipeline :color/saturation 2.25))]
+    (is (= {:color/input-space :media-native :color/output-space :display-p3
+            :color/exposure-stops 5.0 :color/contrast 0.0 :color/saturation 2.25}
+           (:project/color-pipeline configured)))
+    (is (empty? (nle/validate-project configured)))
+    (is (= [:invalid-color-pipeline]
+           (nle/validate-project (assoc-in configured [:project/color-pipeline :color/output-space] :rec2020))))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))
