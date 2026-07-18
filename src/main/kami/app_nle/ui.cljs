@@ -73,6 +73,18 @@
                     (js/console.warn "NLE media cache restore failed" error)
                     (swap! state assoc :cache-restoring? false)))))))
 (def filters {:none "none" :cinema "contrast(1.18) saturate(1.22)" :mono "grayscale(1) contrast(1.12)" :dream "saturate(1.35) brightness(1.08) blur(1px)"})
+(declare primary-video)
+(defn color-filter [project]
+  (let [{:color/keys [exposure-stops contrast saturation]} (nle/color-pipeline project)]
+    (str "brightness(" (js/Math.pow 2 exposure-stops) ") contrast(" contrast ") saturate(" saturation ")")))
+(defn canvas-context [canvas project]
+  (.getContext canvas "2d" #js {:colorSpace (if (= :display-p3 (:color/output-space (nle/color-pipeline project)))
+                                               "display-p3" "srgb")}))
+(defn set-canvas-node! [node]
+  (reset! canvas-node node)
+  (when (and node (primary-video))
+    (set! (.-width node) (or (.-videoWidth (primary-video)) 1280))
+    (set! (.-height node) (or (.-videoHeight (primary-video)) 720))))
 (defn primary-video [] (if (= :a (:primary-slot @state)) @video-a-node @video-b-node))
 (defn secondary-video [] (if (= :a (:primary-slot @state)) @video-b-node @video-a-node))
 (defn audio-meter-db []
@@ -84,7 +96,7 @@
         (if (pos? rms) (* 20 (/ (js/Math.log rms) (js/Math.log 10))) -96))) -96))
 (defn draw-frame! []
   (when (and (primary-video) @canvas-node)
-    (let [v (primary-video) overlay (secondary-video) c @canvas-node ctx (.getContext c "2d")
+    (let [v (primary-video) overlay (secondary-video) c @canvas-node ctx (canvas-context c (:project @state))
           segment (:export-segment @state) transition (:segment/transition-out segment)
           elapsed (when segment (- (.-currentTime v) (:segment/source-start-sec segment)))
           remaining (when segment (- (:segment/duration-sec segment) elapsed))
@@ -93,7 +105,8 @@
           dissolve (:dissolve @state)
           progress (when dissolve (min 1 (max 0 (/ (- (js/performance.now) (:started-ms dissolve)) (:duration-ms dissolve)))))]
       (when (>= (.-readyState v) 2)
-        (set! (.-filter ctx) (get filters (:effect @state) "none"))
+        (let [creative (get filters (:effect @state) "none")]
+          (set! (.-filter ctx) (str (color-filter (:project @state)) (when-not (= "none" creative) (str " " creative)))))
         (set! (.-globalAlpha ctx) 1) (set! (.-fillStyle ctx) "black") (.fillRect ctx 0 0 (.-width c) (.-height c))
         (set! (.-globalAlpha ctx) (if progress (- 1 progress) fade-alpha)) (.drawImage ctx v 0 0 (.-width c) (.-height c))
         (when (and progress overlay (>= (.-readyState overlay) 2))
@@ -707,6 +720,7 @@
                     project (or (:trim-preview @state) (:project @state))
                     total (max 300 (nle/duration-frames project)) fps (:project/fps project)
                     delivery (nle/delivery-audio project)
+                    color (nle/color-pipeline project)
                     missing (nle/missing-asset-ids project (keys assets))]
  [:main [:header [:div [:small "KOTOBA-LANG / VIDEO"] [:h1 "KAMI NLE"]] [:div.transport [:button.primary {:on-click toggle-play! :disabled (not decoded?)} (if playing? "❚❚ Pause" "▶ Play decoded media")] [:output (nle/timecode frame fps)]]]
   [:section.workspace [:aside [:h2 "Project bin"] [:label.import "Import / relink V1 videos" [:input {:type "file" :accept "video/*" :multiple true :aria-label "Import or relink NLE videos" :on-change load-media!}]]
@@ -726,6 +740,19 @@
                                                  :aria-label "Use proxies for preview"
                                                  :on-change #(toggle-proxy-preview! (.. % -target -checked))}]]
     [:label "Effect" [:select {:value (name effect) :on-change #(swap! state assoc :effect (keyword (.. % -target -value)))} [:option {:value "none"} "None"] [:option {:value "cinema"} "Cinema"] [:option {:value "mono"} "Monochrome"] [:option {:value "dream"} "Dream"]]]
+    [:label "Input color" [:output {:aria-label "Input color space"} "Media metadata"]]
+    [:label "Output color" [:select {:value (name (:color/output-space color)) :aria-label "Output color space"
+                                       :on-change #(swap! state update :project nle/set-color-pipeline :color/output-space
+                                                          (keyword (.. % -target -value)))}
+                              [:option {:value "srgb"} "sRGB"] [:option {:value "display-p3"} "Display P3"]]]
+    (for [[key label minimum maximum step]
+          [[:color/exposure-stops "Exposure stops" -5 5 0.1]
+           [:color/contrast "Color contrast" 0 3 0.05]
+           [:color/saturation "Color saturation" 0 3 0.05]]]
+      ^{:key key} [:label label [:input {:type "number" :min minimum :max maximum :step step
+                                          :value (get color key) :aria-label label
+                                          :on-change #(swap! state update :project nle/set-color-pipeline key
+                                                             (js/parseFloat (.. % -target -value)))}]])
     (when-let [clip (selected-clip project selected)]
       [:div.asset [:strong (str "Edit • " (:clip/name clip))]
        [:label "Source in" [:input {:type "number" :min 0 :value (:clip/in-frame clip) :on-change #(edit-trim! clip :in (js/parseInt (.. % -target -value)))}]]
@@ -820,7 +847,9 @@
    (when (seq missing) [:aside.missing-media [:strong (str "Missing media: " (count missing))] [:span (pr-str missing)]])
    [:div.monitor [:video {:ref #(reset! video-a-node %) :style {:display "none"} :plays-inline true :on-loaded-metadata media-ready! :on-pause #(swap! state assoc :playing? false)}]
     [:video {:ref #(reset! video-b-node %) :style {:display "none"} :plays-inline true}]
-    [:div.frame [:span "PROGRAM"] [:strong (nle/timecode frame fps)] [:canvas {:ref #(reset! canvas-node %) :aria-label "Decoded video preview"}] (when-not decoded? [:div.scene "IMPORT VIDEO"])] [:div.tools [:button {:disabled (nil? selected) :on-click #(swap! state update :project nle/split-clip selected frame (str selected "-b"))} "Split at playhead"] [:span (str fps " fps • " total " frames • " (name effect))]]]]
+    [:div.frame [:span "PROGRAM"] [:strong (nle/timecode frame fps)] ^{:key (name (:color/output-space color))}
+     [:canvas {:ref set-canvas-node! :aria-label "Decoded video preview"}]
+     (when-not decoded? [:div.scene "IMPORT VIDEO"])] [:div.tools [:button {:disabled (nil? selected) :on-click #(swap! state update :project nle/split-clip selected frame (str selected "-b"))} "Split at playhead"] [:span (str fps " fps • " total " frames • " (name effect) " • " (name (:color/output-space color)))]]]]
   [:section.timeline [:input.scrub {:type "range" :min 0 :max total :value frame :aria-label "Playhead" :on-change #(let [f (js/parseInt (.. % -target -value))] (swap! state assoc :frame f) (seek-frame! f))}] (for [track (:project/tracks project)] ^{:key (:track/id track)} [:div.track [:div.track-name (:track/name track)] [:div.lane (for [c (:track/clips track)] ^{:key (:clip/id c)} [clip-view c total])]])]
   [:footer (if-let [e (seq (nle/validate-project project))] (str "Errors: " e) "HTMLVideo decode • canvas effects • MediaRecorder WebM export")]]))
 (defonce root-node (atom nil))

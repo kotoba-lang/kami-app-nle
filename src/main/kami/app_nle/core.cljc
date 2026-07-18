@@ -29,6 +29,8 @@
 (def flat-eq {:low-db 0.0 :mid-db 0.0 :high-db 0.0})
 (def default-delivery-audio {:delivery/normalize? true :delivery/target-lufs -14.0
                              :delivery/sample-peak-ceiling-db -1.0})
+(def default-color-pipeline {:color/input-space :media-native :color/output-space :srgb
+                             :color/exposure-stops 0.0 :color/contrast 1.0 :color/saturation 1.0})
 (defn clamp-db [db] (max -12.0 (min 12.0 (or db 0.0))))
 (defn normalize-eq [eq]
   {:low-db (clamp-db (:low-db eq)) :mid-db (clamp-db (:mid-db eq)) :high-db (clamp-db (:high-db eq))})
@@ -37,8 +39,10 @@
 (defn project [m] (merge {:project/schema schema :project/fps 30 :project/export-profile :review
                            :project/master-eq flat-eq :project/master-gain 0.9
                            :project/delivery-audio default-delivery-audio
+                           :project/color-pipeline default-color-pipeline
                            :project/assets {} :project/tracks []} m))
 (defn delivery-audio [p] (merge default-delivery-audio (:project/delivery-audio p)))
+(defn color-pipeline [p] (merge default-color-pipeline (:project/color-pipeline p)))
 (defn clamp [minimum maximum value] (max minimum (min maximum value)))
 (defn set-delivery-audio [p key value]
   (let [p (assoc p :project/delivery-audio (delivery-audio p))]
@@ -62,6 +66,16 @@
   (if (<= measured-lufs -95)
     0.0
     (min (- target-lufs measured-lufs) (- ceiling-db sample-peak-db))))
+(defn set-color-pipeline [p key value]
+  (let [p (assoc p :project/color-pipeline (color-pipeline p))]
+    (case key
+      :color/input-space (if (= :media-native value) (assoc-in p [:project/color-pipeline key] value) p)
+      :color/output-space (if (contains? #{:srgb :display-p3} value)
+                            (assoc-in p [:project/color-pipeline key] value) p)
+      :color/exposure-stops (assoc-in p [:project/color-pipeline key] (clamp -5.0 5.0 value))
+      :color/contrast (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
+      :color/saturation (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
+      p)))
 (defn register-asset
   ([p asset-id name] (register-asset p asset-id name nil))
   ([p asset-id name sha256]
@@ -235,6 +249,13 @@
                    (<= -30 (:delivery/target-lufs delivery) -5)
                    (<= -12 (:delivery/sample-peak-ceiling-db delivery) 0))
       [:invalid-delivery-audio]))
+  (when-let [color (:project/color-pipeline p)]
+    (when-not (and (= :media-native (:color/input-space color))
+                   (contains? #{:srgb :display-p3} (:color/output-space color))
+                   (<= -5 (:color/exposure-stops color) 5)
+                   (<= 0 (:color/contrast color) 3)
+                   (<= 0 (:color/saturation color) 3))
+      [:invalid-color-pipeline]))
   (for [c (mapcat :track/clips (:project/tracks p)) :when (or (neg? (:clip/start-frame c)) (>= (:clip/in-frame c) (:clip/out-frame c)))] [:invalid-clip (:clip/id c)])
   (for [c (mapcat :track/clips (:project/tracks p)) :when (and (:clip/audio-eq c) (not (valid-eq? (:clip/audio-eq c))))] [:invalid-clip-eq (:clip/id c)])
   (for [c (audio-clips p) :when (or (neg? (or (:clip/fade-in-sec c) 0)) (neg? (or (:clip/fade-out-sec c) 0)))] [:invalid-audio-fade (:clip/id c)])
