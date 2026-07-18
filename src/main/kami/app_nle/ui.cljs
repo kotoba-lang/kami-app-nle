@@ -88,11 +88,10 @@
                      (if top? (+ content-y font-size) (- (+ content-y content-height) block-height)))
     top? (+ safe-y font-size (* index (+ block-height (* font-size 0.5))))
     :else (- canvas-height safe-y block-height (* index (+ block-height (* font-size 0.5))))))
-(defn draw-caption-ruby! [ctx caption style x base-y font-size]
+(defn draw-caption-ruby! [ctx line style x base-y font-size]
   (when (and (not (contains? #{:tbrl :tblr} (:caption/writing-mode style)))
              (seq (:caption/ruby-runs style)))
-    (let [line (first (str/split (:caption/text caption) #"\r?\n"))
-          full-width (.-width (.measureText ctx line))
+    (let [full-width (.-width (.measureText ctx line))
           left (case (:caption/align style) :left x :right (- x full-width) (- x (/ full-width 2)))]
       (doseq [{base :ruby/base annotation :ruby/text} (:caption/ruby-runs style)
               :let [index (str/index-of line base)] :when (some? index)]
@@ -144,7 +143,6 @@
         (set! (.-filter ctx) "none") (set! (.-globalAlpha ctx) 1)
         (doseq [[index caption] (map-indexed vector (nle/captions-at-frame (:project @state) caption-frame))]
           (let [style (nle/normalize-caption-style (:caption/style caption))
-                lines (str/split (:caption/text caption) #"\r?\n")
                 font-size (max 18 (js/Math.round (* (.-height c) 0.055 (:caption/font-scale style))))
                 line-height (* font-size 1.25)
                 custom-region? (nle/caption-custom-region? style)
@@ -158,6 +156,11 @@
                 content-y (+ region-y (* region-height (/ pad-top 100)))
                 content-width (max 1 (- region-width (* region-width (/ (+ pad-left pad-right) 100))))
                 content-height (max 1 (- region-height (* region-height (/ (+ pad-top pad-bottom) 100))))
+                cjk? (boolean (re-find #"^(?i:ja|zh)(?:-|$)" (nle/caption-language caption)))
+                max-units (max 4 (js/Math.floor (/ content-width (* font-size (if cjk? 1.0 0.58)))))
+                lines (if (contains? #{:tbrl :tblr} (:caption/writing-mode style))
+                        (str/split (:caption/text caption) #"\r?\n")
+                        (nle/caption-line-breaks (:caption/text caption) (nle/caption-language caption) max-units))
                 safe-x (if custom-region? content-x (* (.-width c) 0.05))
                 safe-y (if custom-region? content-y (* (.-height c) 0.05))
                 align (:caption/align style)
@@ -187,8 +190,9 @@
                     (.fillText ctx (str glyph) column-x (+ content-y font-size (* glyph-index line-height)))))
                 (do
                   (doseq [[line-index line] (map-indexed vector lines)]
-                    (.fillText ctx line x (+ base-y (* line-index line-height))))
-                  (draw-caption-ruby! ctx caption style x base-y font-size))))
+                    (let [line-y (+ base-y (* line-index line-height))]
+                      (.fillText ctx line x line-y)
+                      (draw-caption-ruby! ctx line style x line-y font-size))))))
             (when custom-region? (.restore ctx))))
         (set! (.-globalAlpha ctx) 1)
         (swap! state assoc :frame caption-frame
@@ -1125,6 +1129,8 @@
        [:input {:value (:caption/text caption) :aria-label (str (:caption/id caption) " text")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
                                    {:caption/text (.. % -target -value)})}]
+       [:small {:aria-label (str (:caption/id caption) " line break preview")}
+        (str/join " ⏎ " (nle/caption-line-breaks (:caption/text caption) (nle/caption-language caption) 24))]
        [:input {:value (nle/caption-language caption) :aria-label (str (:caption/id caption) " language")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
                                    {:caption/language (.. % -target -value)})}]
