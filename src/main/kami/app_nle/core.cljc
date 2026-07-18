@@ -106,7 +106,10 @@
   (if (and (string? language) (re-matches language-pattern language))
     (assoc p :project/caption-language language) p))
 (defn remove-caption [p caption-id]
-  (update p :project/captions #(vec (remove (fn [caption] (= caption-id (:caption/id caption))) %))))
+  (-> p
+      (update :project/captions #(vec (remove (fn [caption] (= caption-id (:caption/id caption))) %)))
+      (update :project/review-notifications
+              #(vec (remove (fn [notification] (= caption-id (:notification/caption-id notification))) %)))))
 (defn set-caption-reviewer [p caption-id reviewer]
   (if (string? reviewer)
     (update p :project/captions #(mapv (fn [caption]
@@ -144,38 +147,78 @@
                                {:review/id note-id :review/author author :review/text text :review/at created-at})
                        caption)) %))
     p))
+(def mention-pattern #"@([A-Za-z0-9._-]+)")
+(defn mentioned-users [text]
+  (if (string? text) (->> (re-seq mention-pattern text) (map second) distinct vec) []))
+(defn- append-review-notification [p notification]
+  (if (some #(= (:notification/id notification) (:notification/id %))
+            (:project/review-notifications p))
+    p (update p :project/review-notifications (fnil conj []) notification)))
+(defn review-notifications-for [p user]
+  (->> (:project/review-notifications p)
+       (filter #(= user (:notification/recipient %)))
+       (sort-by (juxt :notification/at :notification/id)) vec))
+(defn unread-review-notifications-for [p user]
+  (vec (remove :notification/read-at (review-notifications-for p user))))
+(defn mark-review-notification-read [p notification-id actor read-at]
+  (if (and (string? actor) (not (str/blank? actor)) (number? read-at) (not (neg? read-at)))
+    (update p :project/review-notifications
+            #(mapv (fn [notification]
+                     (if (and (= notification-id (:notification/id notification))
+                              (= actor (:notification/recipient notification))
+                              (nil? (:notification/read-at notification)))
+                       (assoc notification :notification/read-at read-at) notification)) %))
+    p))
+(defn- notify-review-users [p caption-id thread-id event-id author text created-at recipient default-kind]
+  (let [mentions (set (mentioned-users text))
+        recipients (disj (cond-> mentions recipient (conj recipient)) author)]
+    (reduce (fn [project recipient]
+              (append-review-notification
+               project {:notification/id (str event-id ":" recipient)
+                        :notification/recipient recipient :notification/caption-id caption-id
+                        :notification/thread-id thread-id
+                        :notification/kind (if (contains? mentions recipient) :mention default-kind)
+                        :notification/actor author :notification/at created-at})) p (sort recipients))))
 (defn start-caption-review-thread [p caption-id thread-id author text created-at]
   (if (and (string? thread-id) (not (str/blank? thread-id))
            (string? author) (not (str/blank? author))
            (string? text) (not (str/blank? text))
            (number? created-at) (not (neg? created-at)))
-    (update p :project/captions
-            #(mapv (fn [caption]
-                     (if (and (= caption-id (:caption/id caption))
-                              (not (some (fn [note] (= thread-id (:review/id note))) (:caption/review-notes caption))))
-                       (update caption :caption/review-notes (fnil conj [])
-                               {:review/id thread-id :review/thread-id thread-id :review/parent-id nil
-                                :review/author author :review/text text :review/at created-at
-                                :review/resolved? false :review/resolution-history []})
-                       caption)) %))
+    (let [reviewer (:caption/reviewer (some #(when (= caption-id (:caption/id %)) %) (:project/captions p)))
+          updated (update p :project/captions
+                          #(mapv (fn [caption]
+                                   (if (and (= caption-id (:caption/id caption))
+                                            (not (some (fn [note] (= thread-id (:review/id note))) (:caption/review-notes caption))))
+                                     (update caption :caption/review-notes (fnil conj [])
+                                             {:review/id thread-id :review/thread-id thread-id :review/parent-id nil
+                                              :review/author author :review/text text :review/at created-at
+                                              :review/resolved? false :review/resolution-history []})
+                                     caption)) %))]
+      (if (= p updated) p (notify-review-users updated caption-id thread-id thread-id author text created-at
+                                                reviewer :review-request)))
     p))
 (defn reply-caption-review-thread [p caption-id thread-id reply-id author text created-at]
   (if (and (string? reply-id) (not (str/blank? reply-id))
            (string? author) (not (str/blank? author))
            (string? text) (not (str/blank? text))
            (number? created-at) (not (neg? created-at)))
-    (update p :project/captions
-            #(mapv (fn [caption]
-                     (let [notes (:caption/review-notes caption)
-                           root (some (fn [note] (when (and (= thread-id (:review/thread-id note))
-                                                            (nil? (:review/parent-id note))) note)) notes)]
-                       (if (and (= caption-id (:caption/id caption)) root
-                                (not (:review/resolved? root))
-                                (not (some (fn [note] (= reply-id (:review/id note))) notes)))
-                         (update caption :caption/review-notes (fnil conj [])
-                                 {:review/id reply-id :review/thread-id thread-id :review/parent-id thread-id
-                                  :review/author author :review/text text :review/at created-at})
-                         caption))) %))
+    (let [target-caption (some #(when (= caption-id (:caption/id %)) %) (:project/captions p))
+          root (some (fn [note] (when (and (= thread-id (:review/thread-id note))
+                                            (nil? (:review/parent-id note))) note))
+                     (:caption/review-notes target-caption))
+          updated (update p :project/captions
+                          #(mapv (fn [caption]
+                                   (let [notes (:caption/review-notes caption)]
+                                     (if (and (= caption-id (:caption/id caption)) root
+                                              (not (:review/resolved? root))
+                                              (not (some (fn [note] (= reply-id (:review/id note))) notes)))
+                                       (update caption :caption/review-notes (fnil conj [])
+                                               {:review/id reply-id :review/thread-id thread-id :review/parent-id thread-id
+                                                :review/author author :review/text text :review/at created-at})
+                                       caption))) %))]
+      (if (= p updated) p
+          (notify-review-users updated caption-id thread-id reply-id author text created-at
+                               (when (not= author (:review/author root)) (:review/author root)) :thread-reply)))
     p))
 (defn set-caption-review-thread-resolution [p caption-id thread-id resolved? actor changed-at]
   (if (and (boolean? resolved?) (string? actor) (not (str/blank? actor))
@@ -201,7 +244,8 @@
         source-captions (filter #(= source (caption-language %)) (:project/captions p))]
     (if (and (not= source target) (seq source-captions)
              (= target-language target))
-      (let [retained (remove #(= target (caption-language %)) (:project/captions p))
+      (let [removed-ids (set (map :caption/id (filter #(= target (caption-language %)) (:project/captions p))))
+            retained (remove #(= target (caption-language %)) (:project/captions p))
             cloned (map-indexed (fn [index caption]
                                   (-> caption
                                       (assoc :caption/id (str "translation:" target ":" index)
@@ -210,6 +254,9 @@
                                       (dissoc :caption/reviewer))) source-captions)]
         (assoc p :project/captions (->> (concat retained cloned)
                                         (sort-by (juxt :caption/start-frame :caption/id)) vec)
+                 :project/review-notifications
+                 (vec (remove #(contains? removed-ids (:notification/caption-id %))
+                              (:project/review-notifications p)))
                  :project/caption-language target))
       p)))
 (defn add-caption
@@ -480,6 +527,32 @@
                    (<= 0 (:color/contrast color) 3)
                    (<= 0 (:color/saturation color) 3))
       [:invalid-color-pipeline]))
+  (when (not= (count (:project/review-notifications p))
+              (count (set (map :notification/id (:project/review-notifications p)))))
+    [:duplicate-review-notification-id])
+  (for [notification (:project/review-notifications p)
+        :when (or (not (string? (:notification/id notification)))
+                  (str/blank? (:notification/id notification))
+                  (not (string? (:notification/recipient notification)))
+                  (str/blank? (:notification/recipient notification))
+                  (not (string? (:notification/caption-id notification)))
+                  (not (some #(= (:notification/caption-id notification) (:caption/id %))
+                             (:project/captions p)))
+                  (not (string? (:notification/thread-id notification)))
+                  (not (some #(and (= (:notification/caption-id notification) (:caption/id %))
+                                   (some (fn [note] (= (:notification/thread-id notification)
+                                                       (:review/thread-id note)))
+                                         (:caption/review-notes %)))
+                             (:project/captions p)))
+                  (not (contains? #{:mention :review-request :thread-reply} (:notification/kind notification)))
+                  (not (string? (:notification/actor notification)))
+                  (str/blank? (:notification/actor notification))
+                  (not (number? (:notification/at notification)))
+                  (neg? (or (:notification/at notification) -1))
+                  (and (:notification/read-at notification)
+                       (or (not (number? (:notification/read-at notification)))
+                           (< (:notification/read-at notification) (:notification/at notification)))))]
+    [:invalid-review-notification (:notification/id notification)])
   (for [caption (:project/captions p)
         :when (or (not (string? (:caption/id caption))) (str/blank? (:caption/id caption))
                   (boolean (re-find #"[\r\n]" (:caption/id caption)))

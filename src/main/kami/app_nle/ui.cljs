@@ -824,6 +824,18 @@
                                                :on-change #(swap! state assoc :caption-language (.. % -target -value))}]]
     [:label "Review actor" [:input {:value (:review-author @state) :aria-label "Caption review actor"
                                       :on-change #(swap! state assoc :review-author (.. % -target -value))}]]
+    (let [notifications (nle/unread-review-notifications-for project (:review-author @state))]
+      [:div.asset {:aria-label "Unread review notifications"}
+       [:strong (str "Unread review notifications: " (count notifications))]
+       (for [notification notifications]
+         ^{:key (:notification/id notification)}
+         [:span
+          [:small (str (name (:notification/kind notification)) " from " (:notification/actor notification)
+                       " on " (:notification/caption-id notification))]
+          [:button {:aria-label (str "Mark notification read " (:notification/id notification))
+                    :on-click #(swap! state update :project nle/mark-review-notification-read
+                                      (:notification/id notification) (:review-author @state) (js/Date.now))}
+           "Mark read"]])])
     [:label.import "Import WebVTT for language"
      [:input {:type "file" :accept ".vtt,text/vtt" :aria-label "Import WebVTT"
               :on-change import-webvtt!}]]
