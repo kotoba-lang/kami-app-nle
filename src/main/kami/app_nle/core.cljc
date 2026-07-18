@@ -91,9 +91,13 @@
       :color/saturation (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
       p)))
 (defn normalize-caption-style [style]
-  {:caption/position (if (contains? #{:top :bottom} (:caption/position style)) (:caption/position style) :bottom)
-   :caption/align (if (contains? #{:left :center :right} (:caption/align style)) (:caption/align style) :center)
-   :caption/font-scale (clamp 0.5 2.0 (or (:caption/font-scale style) 1.0))})
+  (cond-> {:caption/position (if (contains? #{:top :bottom} (:caption/position style)) (:caption/position style) :bottom)
+           :caption/align (if (contains? #{:left :center :right} (:caption/align style)) (:caption/align style) :center)
+           :caption/font-scale (clamp 0.5 2.0 (or (:caption/font-scale style) 1.0))}
+    (number? (:caption/x-percent style)) (assoc :caption/x-percent (clamp 0.0 100.0 (:caption/x-percent style)))
+    (number? (:caption/y-percent style)) (assoc :caption/y-percent (clamp 0.0 100.0 (:caption/y-percent style)))
+    (number? (:caption/width-percent style)) (assoc :caption/width-percent (clamp 1.0 100.0 (:caption/width-percent style)))
+    (number? (:caption/height-percent style)) (assoc :caption/height-percent (clamp 1.0 100.0 (:caption/height-percent style)))))
 (def language-pattern #"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 (def caption-statuses #{:draft :review :approved})
 (defn caption-status [caption] (if (contains? caption-statuses (:caption/status caption))
@@ -374,8 +378,8 @@
   ([p] (imsc1 p (normalize-language (:project/caption-language p))))
   ([p language]
    (let [language (normalize-language language)
-         cues (filter #(and (caption-deliverable? %) (= language (caption-language %)))
-                      (:project/captions p))]
+         cues (vec (filter #(and (caption-deliverable? %) (= language (caption-language %)))
+                           (:project/captions p)))]
      (str "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
           "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:tts=\"http://www.w3.org/ns/ttml#styling\" "
           "xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" xml:lang=\"" (xml-escape language)
@@ -384,6 +388,15 @@
           "  <head><layout>"
           "<region xml:id=\"top\" tts:origin=\"10% 8%\" tts:extent=\"80% 38%\"/>"
           "<region xml:id=\"bottom\" tts:origin=\"10% 62%\" tts:extent=\"80% 30%\"/>"
+          (apply str
+                 (map-indexed
+                  (fn [index caption]
+                    (let [style (normalize-caption-style (:caption/style caption))]
+                      (when (and (contains? style :caption/x-percent) (contains? style :caption/y-percent))
+                        (str "<region xml:id=\"geometry-" index "\" tts:origin=\""
+                             (:caption/x-percent style) "% " (:caption/y-percent style) "%\" tts:extent=\""
+                             (or (:caption/width-percent style) 80.0) "% "
+                             (or (:caption/height-percent style) 30.0) "%\"/>")))) cues))
           "</layout></head>\n  <body><div>\n"
           (str/join "\n"
                     (map-indexed (fn [index caption]
@@ -391,7 +404,10 @@
                              (str "    <p xml:id=\"" (xml-ncname index (:caption/id caption))
                                   "\" begin=\"" (frame->vtt-time (:caption/start-frame caption) (:project/fps p))
                                   "\" end=\"" (frame->vtt-time (:caption/end-frame caption) (:project/fps p))
-                                  "\" region=\"" (name (:caption/position style))
+                                  "\" region=\"" (if (and (contains? style :caption/x-percent)
+                                                            (contains? style :caption/y-percent))
+                                                     (str "geometry-" index)
+                                                     (name (:caption/position style)))
                                   "\" tts:textAlign=\"" (name (:caption/align style))
                                   "\" tts:fontSize=\"" (* 100 (:caption/font-scale style)) "%\">"
                                   (imsc-text (:caption/text caption)) "</p>"))) cues))
