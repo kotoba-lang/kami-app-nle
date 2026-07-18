@@ -49,6 +49,8 @@
   (is (nil? (nle/accept-project [:not :a :project]))))
 (deftest versioned-crash-recovery
   (is (= p (nle/recover-project (nle/recovery-envelope p))))
+  (is (= {:project p :history nle/empty-history}
+         (nle/recover-workspace {:recovery/version 1 :recovery/project p})))
   (is (nil? (nle/recover-project {:recovery/version 999 :recovery/project p})))
   (is (nil? (nle/recover-project {:recovery/version 1 :recovery/project (assoc p :project/schema "foreign/v1")}))))
 (deftest persisted-asset-relink-manifest
@@ -66,4 +68,13 @@
     (is (= p (:project undone)))
     (is (= p2 (:project redone)))
     (is (= 50 (count (:history/past (reduce (fn [h n] (nle/record-history h (assoc p :n n)))
-                                             nle/empty-history (range 70))))))))
+                                             nle/empty-history (range 70))))))
+    (is (= {:project p2 :history history}
+           (nle/recover-workspace (nle/recovery-envelope p2 history))))
+    (is (nil? (nle/recover-workspace
+               (nle/recovery-envelope p2 {:history/past [(assoc p :project/schema "foreign/v1")]
+                                          :history/future []}))))
+    (is (= 50 (count (:history/past
+                      (:history (nle/recover-workspace
+                                 (nle/recovery-envelope p2 {:history/past (vec (repeat 70 p))
+                                                            :history/future []})))))))))
