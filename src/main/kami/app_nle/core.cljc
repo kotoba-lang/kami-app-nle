@@ -107,6 +107,11 @@
     (assoc p :project/caption-language language) p))
 (defn remove-caption [p caption-id]
   (update p :project/captions #(vec (remove (fn [caption] (= caption-id (:caption/id caption))) %))))
+(defn set-caption-reviewer [p caption-id reviewer]
+  (if (and (string? reviewer) (not (str/blank? reviewer)))
+    (update p :project/captions #(mapv (fn [caption] (if (= caption-id (:caption/id caption))
+                                                       (assoc caption :caption/reviewer reviewer) caption)) %))
+    p))
 (defn set-caption-status
   ([p caption-id status] (set-caption-status p caption-id status "system" 0))
   ([p caption-id status actor changed-at]
@@ -114,7 +119,9 @@
             (number? changed-at) (not (neg? changed-at)))
      (update p :project/captions
              #(mapv (fn [caption]
-                      (if (and (= caption-id (:caption/id caption)) (not= status (caption-status caption)))
+                      (if (and (= caption-id (:caption/id caption)) (not= status (caption-status caption))
+                               (or (not= status :approved) (nil? (:caption/reviewer caption))
+                                   (= actor (:caption/reviewer caption))))
                         (-> caption
                             (assoc :caption/status status)
                             (update :caption/status-history (fnil conj [])
@@ -425,6 +432,8 @@
                   (and (:caption/language caption)
                        (not (re-matches language-pattern (:caption/language caption))))
                   (and (:caption/status caption) (not (contains? caption-statuses (:caption/status caption))))
+                  (and (:caption/reviewer caption)
+                       (or (not (string? (:caption/reviewer caption))) (str/blank? (:caption/reviewer caption))))
                   (some (fn [note]
                           (or (not (string? (:review/id note))) (str/blank? (:review/id note))
                               (not (string? (:review/author note))) (str/blank? (:review/author note))
