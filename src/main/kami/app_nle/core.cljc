@@ -53,6 +53,7 @@
                            :project/delivery-audio default-delivery-audio
                            :project/color-pipeline default-color-pipeline
                            :project/captions []
+                           :project/caption-language "en"
                            :project/assets {} :project/tracks []} m))
 (defn delivery-audio [p] (merge default-delivery-audio (:project/delivery-audio p)))
 (defn color-pipeline [p] (merge default-color-pipeline (:project/color-pipeline p)))
@@ -93,16 +94,26 @@
   {:caption/position (if (contains? #{:top :bottom} (:caption/position style)) (:caption/position style) :bottom)
    :caption/align (if (contains? #{:left :center :right} (:caption/align style)) (:caption/align style) :center)
    :caption/font-scale (clamp 0.5 2.0 (or (:caption/font-scale style) 1.0))})
+(def language-pattern #"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+(defn normalize-language [language] (if (and (string? language) (re-matches language-pattern language)) language "en"))
+(defn caption-language [caption] (normalize-language (:caption/language caption)))
+(defn caption-languages [p] (->> (:project/captions p) (map caption-language) set sort vec))
+(defn set-caption-language [p language]
+  (if (and (string? language) (re-matches language-pattern language))
+    (assoc p :project/caption-language language) p))
 (defn add-caption
   ([p caption-id start-frame end-frame text]
-   (add-caption p caption-id start-frame end-frame text default-caption-style))
+   (add-caption p caption-id start-frame end-frame text "en" default-caption-style))
   ([p caption-id start-frame end-frame text style]
+   (add-caption p caption-id start-frame end-frame text "en" style))
+  ([p caption-id start-frame end-frame text language style]
   (if (some #(= caption-id (:caption/id %)) (:project/captions p))
     p
     (update p :project/captions
             #(->> (conj (vec %) {:caption/id caption-id :caption/start-frame (max 0 start-frame)
                                  :caption/end-frame (max (inc (max 0 start-frame)) end-frame)
-                                 :caption/text (str text) :caption/style (normalize-caption-style style)})
+                                 :caption/text (str text) :caption/language (normalize-language language)
+                                 :caption/style (normalize-caption-style style)})
                   (sort-by (juxt :caption/start-frame :caption/id)) vec)))))
 (defn update-caption [p caption-id changes]
   (update p :project/captions
@@ -112,12 +123,14 @@
                               (assoc candidate :caption/start-frame start
                                                :caption/end-frame (max (inc start) (:caption/end-frame candidate))
                                                :caption/text (str (:caption/text candidate))
+                                               :caption/language (caption-language candidate)
                                                :caption/style (normalize-caption-style (:caption/style candidate))))
                             caption)))
                 (sort-by (juxt :caption/start-frame :caption/id)) vec)))
 (defn captions-at-frame [p frame]
   (->> (:project/captions p)
-       (filter #(<= (:caption/start-frame %) frame (dec (:caption/end-frame %)))) vec))
+       (filter #(and (= (normalize-language (:project/caption-language p)) (caption-language %))
+                     (<= (:caption/start-frame %) frame (dec (:caption/end-frame %))))) vec))
 (declare pad2)
 (defn- pad3 [n] (cond (< n 10) (str "00" n) (< n 100) (str "0" n) :else (str n)))
 (defn frame->vtt-time [frame fps]
@@ -126,7 +139,9 @@
         ms (mod millis 1000) seconds-total (quot millis 1000) seconds (mod seconds-total 60)
         minutes-total (quot seconds-total 60) minutes (mod minutes-total 60) hours (quot minutes-total 60)]
     (str (pad2 hours) ":" (pad2 minutes) ":" (pad2 seconds) "." (pad3 ms))))
-(defn webvtt [p]
+(defn webvtt
+  ([p] (webvtt p (normalize-language (:project/caption-language p))))
+  ([p language]
   (str "WEBVTT\n\n"
        (str/join "\n\n"
                  (map (fn [caption]
@@ -134,8 +149,8 @@
                              (frame->vtt-time (:caption/start-frame caption) (:project/fps p)) " --> "
                              (frame->vtt-time (:caption/end-frame caption) (:project/fps p)) "\n"
                              (:caption/text caption)))
-                      (:project/captions p)))
-       (when (seq (:project/captions p)) "\n")))
+                      (filter #(= (normalize-language language) (caption-language %)) (:project/captions p))))
+       (when (seq (filter #(= (normalize-language language) (caption-language %)) (:project/captions p))) "\n"))))
 (defn register-asset
   ([p asset-id name] (register-asset p asset-id name nil))
   ([p asset-id name sha256]
@@ -320,11 +335,16 @@
         :when (or (not (string? (:caption/id caption))) (str/blank? (:caption/id caption))
                   (boolean (re-find #"[\r\n]" (:caption/id caption)))
                   (not (string? (:caption/text caption))) (str/blank? (:caption/text caption))
+                  (and (:caption/language caption)
+                       (not (re-matches language-pattern (:caption/language caption))))
                   (and (:caption/style caption)
                        (not= (:caption/style caption) (normalize-caption-style (:caption/style caption))))
                   (neg? (:caption/start-frame caption))
                   (not (< (:caption/start-frame caption) (:caption/end-frame caption))))]
     [:invalid-caption (:caption/id caption)])
+  (when (and (:project/caption-language p)
+             (not (re-matches language-pattern (:project/caption-language p))))
+    [:invalid-caption-language])
   (when (not= (count (:project/captions p)) (count (set (map :caption/id (:project/captions p)))))
     [:duplicate-caption-id])
   (for [c (mapcat :track/clips (:project/tracks p)) :when (or (neg? (:clip/start-frame c)) (>= (:clip/in-frame c) (:clip/out-frame c)))] [:invalid-clip (:clip/id c)])

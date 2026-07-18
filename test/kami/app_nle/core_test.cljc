@@ -149,6 +149,20 @@
     (is (empty? (nle/validate-project captioned)))
     (is (= [[:invalid-caption "styled"]]
            (nle/validate-project (assoc-in captioned [:project/captions 0 :caption/style :caption/font-scale] 4))))))
+(deftest multilingual-caption-selection-and-delivery
+  (let [localized (-> p
+                      (nle/add-caption "en-1" 0 60 "Hello" "en" nle/default-caption-style)
+                      (nle/add-caption "ja-1" 0 60 "こんにちは" "ja" nle/default-caption-style))
+        japanese (nle/set-caption-language localized "ja")]
+    (is (= ["en" "ja"] (nle/caption-languages localized)))
+    (is (= ["en-1"] (mapv :caption/id (nle/captions-at-frame localized 30))))
+    (is (= ["ja-1"] (mapv :caption/id (nle/captions-at-frame japanese 30))))
+    (is (str/includes? (nle/webvtt localized "en") "Hello"))
+    (is (not (str/includes? (nle/webvtt localized "en") "こんにちは")))
+    (is (str/includes? (nle/webvtt japanese) "こんにちは"))
+    (is (empty? (nle/validate-project japanese)))
+    (is (= [:invalid-caption-language]
+           (nle/validate-project (assoc japanese :project/caption-language "not valid"))))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))
