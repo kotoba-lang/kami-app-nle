@@ -440,6 +440,27 @@
     (try (.stop source) (catch :default _ nil))
     (doseq [node nodes] (try (.disconnect node) (catch :default _ nil))))
   (reset! lane-audio-runtime []))
+(defn schedule-gain-automation! [param segment elapsed start-at]
+  (let [base (:segment/audio-gain segment)
+        points (:segment/gain-automation segment)]
+    (.setValueAtTime param (nle/automation-value-at base points elapsed) start-at)
+    (doseq [{:automation/keys [sec gain]} points :when (> sec elapsed)]
+      (.linearRampToValueAtTime param gain (+ start-at (- sec elapsed))))))
+(defn schedule-fade-envelope! [param segment elapsed start-at]
+  (let [duration (:segment/duration-sec segment)
+        fade-in (min duration (:segment/fade-in-sec segment))
+        fade-out (min duration (:segment/fade-out-sec segment))
+        out-start (- duration fade-out)
+        intersection (when (pos? (+ fade-in fade-out))
+                       (/ (* duration fade-in) (+ fade-in fade-out)))
+        breakpoints (->> [fade-in out-start intersection duration]
+                         (filter some?) (filter #(and (> % elapsed) (<= % duration)))
+                         distinct sort)]
+    (.setValueAtTime param (nle/fade-value-at duration fade-in fade-out elapsed) start-at)
+    (doseq [sec breakpoints]
+      (.linearRampToValueAtTime param
+                                (nle/fade-value-at duration fade-in fade-out sec)
+                                (+ start-at (- sec elapsed))))))
 (defn schedule-audio-lanes! [from-sec]
   (stop-lane-audio!)
   (when-let [{:keys [context master-input]} @export-audio]
@@ -453,14 +474,16 @@
                                                (max 0 (- (.-duration buffer) offset))))]
               :when (and buffer (pos? duration) (> (+ timeline-start (:segment/duration-sec segment)) from-sec))]
         (let [source (.createBufferSource context) low (.createBiquadFilter context) mid (.createBiquadFilter context)
-              high (.createBiquadFilter context) gain (.createGain context)
-              delay (max 0 (- timeline-start from-sec))]
+              high (.createBiquadFilter context) automation-gain (.createGain context) fade-gain (.createGain context)
+              delay (max 0 (- timeline-start from-sec)) start-at (+ now delay)]
           (set! (.-buffer source) buffer) (configure-eq-nodes! low mid high)
           (apply-eq! {:low low :mid mid :high high} (:segment/audio-eq segment))
-          (set! (.. gain -gain -value) (:segment/audio-gain segment))
-          (.connect source low) (.connect low mid) (.connect mid high) (.connect high gain) (.connect gain master-input)
-          (.start source (+ now delay) offset duration)
-          (swap! lane-audio-runtime conj {:source source :nodes [source low mid high gain]}))))))
+          (schedule-gain-automation! (.-gain automation-gain) segment elapsed start-at)
+          (schedule-fade-envelope! (.-gain fade-gain) segment elapsed start-at)
+          (.connect source low) (.connect low mid) (.connect mid high)
+          (.connect high automation-gain) (.connect automation-gain fade-gain) (.connect fade-gain master-input)
+          (.start source start-at offset duration)
+          (swap! lane-audio-runtime conj {:source source :nodes [source low mid high automation-gain fade-gain]}))))))
 (defn set-master-gain! [gain]
   (swap! state assoc :master-gain gain)
   (when-let [master (:master @export-audio)] (set! (.. master -gain -value) gain)))
@@ -606,6 +629,19 @@
 (defn edit-trim! [clip k value]
   (let [in-frame (if (= k :in) value (:clip/in-frame clip)) out-frame (if (= k :out) value (:clip/out-frame clip))]
     (swap! state update :project nle/trim-clip (:clip/id clip) in-frame out-frame)))
+(defn audio-clip? [project clip]
+  (boolean (some #(= (:clip/id clip) (:clip/id %)) (nle/audio-clips project))))
+(defn audio-clip-duration-sec [project clip]
+  (/ (- (:clip/out-frame clip) (:clip/in-frame clip)) (:project/fps project)))
+(defn set-audio-automation-endpoint! [project clip endpoint gain]
+  (let [duration (audio-clip-duration-sec project clip)
+        base (or (:clip/audio-gain clip) 1)
+        points (or (:clip/gain-automation clip) [])
+        start (nle/automation-value-at base points 0)
+        end (nle/automation-value-at base points duration)]
+    (swap! state update :project nle/set-audio-gain-automation (:clip/id clip)
+           [{:sec 0 :gain (if (= endpoint :start) gain start)}
+            {:sec duration :gain (if (= endpoint :end) gain end)}])))
 (defn app [] (let [{:keys [frame playing? selected decoded? assets effect exporting?]} @state
                     project (or (:trim-preview @state) (:project @state))
                     total (max 300 (nle/duration-frames project)) fps (:project/fps project)
@@ -634,6 +670,25 @@
        [:label "Source out" [:input {:type "number" :min 1 :value (:clip/out-frame clip) :on-change #(edit-trim! clip :out (js/parseInt (.. % -target -value)))}]]
        [:label "Clip audio" [:input {:type "range" :min 0 :max 2 :step 0.05 :value (or (:clip/audio-gain clip) 1)
                                       :aria-label "Clip audio gain" :on-change #(swap! state update :project nle/set-clip-audio-gain (:clip/id clip) (js/parseFloat (.. % -target -value)))}]]
+       (when (audio-clip? project clip)
+         (let [duration (audio-clip-duration-sec project clip)
+               points (or (:clip/gain-automation clip) [])
+               base (or (:clip/audio-gain clip) 1)]
+           [:div
+            [:label "Fade in (s)" [:input {:type "number" :min 0 :max duration :step 0.05
+                                             :value (or (:clip/fade-in-sec clip) 0) :aria-label "Audio fade in seconds"
+                                             :on-change #(swap! state update :project nle/set-audio-fades (:clip/id clip)
+                                                                (js/parseFloat (.. % -target -value)) (or (:clip/fade-out-sec clip) 0))}]]
+            [:label "Fade out (s)" [:input {:type "number" :min 0 :max duration :step 0.05
+                                              :value (or (:clip/fade-out-sec clip) 0) :aria-label "Audio fade out seconds"
+                                              :on-change #(swap! state update :project nle/set-audio-fades (:clip/id clip)
+                                                                 (or (:clip/fade-in-sec clip) 0) (js/parseFloat (.. % -target -value)))}]]
+            [:label "Gain start" [:input {:type "number" :min 0 :max 2 :step 0.05
+                                            :value (nle/automation-value-at base points 0) :aria-label "Audio gain automation start"
+                                            :on-change #(set-audio-automation-endpoint! project clip :start (js/parseFloat (.. % -target -value)))}]]
+            [:label "Gain end" [:input {:type "number" :min 0 :max 2 :step 0.05
+                                          :value (nle/automation-value-at base points duration) :aria-label "Audio gain automation end"
+                                          :on-change #(set-audio-automation-endpoint! project clip :end (js/parseFloat (.. % -target -value)))}]]]))
        (for [[band label] [[:low-db "Clip low EQ"] [:mid-db "Clip mid EQ"] [:high-db "Clip high EQ"]]]
          ^{:key band} [:label label [:input {:type "range" :min -12 :max 12 :step 0.5
                                               :value (get (nle/normalize-eq (:clip/audio-eq clip)) band)
