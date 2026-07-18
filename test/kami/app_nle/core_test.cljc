@@ -236,6 +236,23 @@
     (is (< (Math/abs (- 0.25 (:caption/opacity (nle/caption-style-at-frame caption 50)))) 1.0e-8))
     (is (= 2 (count (re-seq #"calcMode=\"spline\"" xml))))
     (is (empty? (nle/animation-keyframe-segments :opacity [0 1 0] [0 0.8 0.7] :linear [] 0 30)))))
+(deftest caption-animation-editor-validates-project-authoritative-curves
+  (let [style (assoc nle/default-caption-style :caption/animations
+                     [{:animation/property :opacity :animation/from 0 :animation/to 1
+                       :animation/start-frame 0 :animation/end-frame 30
+                       :animation/interpolation :linear}])
+        project (nle/add-caption p "edit" 0 60 "Edit" "en" style)
+        curved (nle/edit-caption-animation project "edit" 0
+                                           {:animation/interpolation :spline
+                                            :animation/key-spline [0.42 0 0.58 1]})
+        rejected (nle/edit-caption-animation curved "edit" 0
+                                             {:animation/key-spline [0.9 0 0.1 1]})]
+    (is (= :spline (get-in curved [:project/captions 0 :caption/style :caption/animations 0
+                                   :animation/interpolation])))
+    (is (= [0.42 0.0 0.58 1.0]
+           (get-in curved [:project/captions 0 :caption/style :caption/animations 0
+                           :animation/key-spline])))
+    (is (= curved rejected))))
 (deftest multilingual-caption-selection-and-delivery
   (let [localized (-> p
                       (nle/add-caption "en-1" 0 60 "Hello" "en" nle/default-caption-style)

@@ -1,5 +1,7 @@
 # KAMI NLE
 
+Caption cards expose project-authoritative interval editing for linear, discrete, and spline animation. Spline intervals provide four bounded Bézier controls with linked `x1 <= x2` UI constraints; every edit is revalidated before persistence and immediately drives preview and production evaluation.
+
 TTML animation ingest accepts bounded multi-keyframe `values`, strictly increasing `keyTimes`, and one validated `keySplines` curve per interval. Up to 17 authored values become 16 project-authoritative intervals evaluated by the same preview/production path and emitted as lossless equivalent IMSC animation segments.
 
 EDN-native browser non-linear video editor for `kotoba-lang`. It owns frame/timecode transport, video and audio lanes, clip selection, trim/split/move semantics, project bin, media effects, and master export. It does not own music composition or 3D character authoring.
