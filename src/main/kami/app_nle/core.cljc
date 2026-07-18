@@ -97,7 +97,14 @@
     (number? (:caption/x-percent style)) (assoc :caption/x-percent (clamp 0.0 100.0 (:caption/x-percent style)))
     (number? (:caption/y-percent style)) (assoc :caption/y-percent (clamp 0.0 100.0 (:caption/y-percent style)))
     (number? (:caption/width-percent style)) (assoc :caption/width-percent (clamp 1.0 100.0 (:caption/width-percent style)))
-    (number? (:caption/height-percent style)) (assoc :caption/height-percent (clamp 1.0 100.0 (:caption/height-percent style)))))
+    (number? (:caption/height-percent style)) (assoc :caption/height-percent (clamp 1.0 100.0 (:caption/height-percent style)))
+    (contains? #{:lrtb :rltb :tbrl :tblr} (:caption/writing-mode style))
+    (assoc :caption/writing-mode (:caption/writing-mode style))
+    (and (vector? (:caption/padding-percent style)) (= 4 (count (:caption/padding-percent style)))
+         (every? number? (:caption/padding-percent style)))
+    (assoc :caption/padding-percent (mapv #(clamp 0.0 50.0 %) (:caption/padding-percent style)))
+    (contains? #{:before :center :after} (:caption/display-align style))
+    (assoc :caption/display-align (:caption/display-align style))))
 (def language-pattern #"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 (def caption-statuses #{:draft :review :approved})
 (defn caption-status [caption] (if (contains? caption-statuses (:caption/status caption))
@@ -374,6 +381,20 @@
   (str/replace (xml-escape text) "\n" "<br/>"))
 (defn- xml-ncname [index value]
   (str "cue-" index "-" (str/replace (str value) #"[^A-Za-z0-9_.-]" "-")))
+(defn caption-custom-region? [style]
+  (or (and (contains? style :caption/x-percent) (contains? style :caption/y-percent))
+      (contains? style :caption/writing-mode) (contains? style :caption/padding-percent)
+      (contains? style :caption/display-align)))
+(defn- imsc-region-attributes [style]
+  (let [top? (= :top (:caption/position style))
+        origin [(or (:caption/x-percent style) 10.0) (or (:caption/y-percent style) (if top? 8.0 62.0))]
+        extent [(or (:caption/width-percent style) 80.0) (or (:caption/height-percent style) (if top? 38.0 30.0))]]
+    (str " tts:origin=\"" (first origin) "% " (second origin) "%\""
+         " tts:extent=\"" (first extent) "% " (second extent) "%\""
+         (when-let [writing (:caption/writing-mode style)] (str " tts:writingMode=\"" (name writing) "\""))
+         (when-let [padding (:caption/padding-percent style)]
+           (str " tts:padding=\"" (str/join " " (map #(str % "%") padding)) "\""))
+         (when-let [display (:caption/display-align style)] (str " tts:displayAlign=\"" (name display) "\"")))))
 (defn imsc1
   ([p] (imsc1 p (normalize-language (:project/caption-language p))))
   ([p language]
@@ -392,11 +413,8 @@
                  (map-indexed
                   (fn [index caption]
                     (let [style (normalize-caption-style (:caption/style caption))]
-                      (when (and (contains? style :caption/x-percent) (contains? style :caption/y-percent))
-                        (str "<region xml:id=\"geometry-" index "\" tts:origin=\""
-                             (:caption/x-percent style) "% " (:caption/y-percent style) "%\" tts:extent=\""
-                             (or (:caption/width-percent style) 80.0) "% "
-                             (or (:caption/height-percent style) 30.0) "%\"/>")))) cues))
+                      (when (caption-custom-region? style)
+                        (str "<region xml:id=\"geometry-" index "\"" (imsc-region-attributes style) "/>")))) cues))
           "</layout></head>\n  <body><div>\n"
           (str/join "\n"
                     (map-indexed (fn [index caption]
@@ -404,8 +422,7 @@
                              (str "    <p xml:id=\"" (xml-ncname index (:caption/id caption))
                                   "\" begin=\"" (frame->vtt-time (:caption/start-frame caption) (:project/fps p))
                                   "\" end=\"" (frame->vtt-time (:caption/end-frame caption) (:project/fps p))
-                                  "\" region=\"" (if (and (contains? style :caption/x-percent)
-                                                            (contains? style :caption/y-percent))
+                                  "\" region=\"" (if (caption-custom-region? style)
                                                      (str "geometry-" index)
                                                      (name (:caption/position style)))
                                   "\" tts:textAlign=\"" (name (:caption/align style))
