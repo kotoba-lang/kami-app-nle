@@ -149,6 +149,15 @@
     (is (empty? (nle/validate-project captioned)))
     (is (= [[:invalid-caption "styled"]]
            (nle/validate-project (assoc-in captioned [:project/captions 0 :caption/style :caption/font-scale] 4))))))
+(deftest caption-region-geometry-round-trips-to-imsc
+  (let [style {:caption/position :top :caption/align :right :caption/font-scale 1.1
+               :caption/x-percent 12.5 :caption/y-percent 7.5
+               :caption/width-percent 70.0 :caption/height-percent 22.0}
+        project (nle/add-caption p "geometry" 0 30 "Placed" "en" style)
+        xml (nle/imsc1 project "en")]
+    (is (= style (get-in project [:project/captions 0 :caption/style])))
+    (is (str/includes? xml "xml:id=\"geometry-0\" tts:origin=\"12.5% 7.5%\" tts:extent=\"70.0% 22.0%\""))
+    (is (str/includes? xml "region=\"geometry-0\""))))
 (deftest multilingual-caption-selection-and-delivery
   (let [localized (-> p
                       (nle/add-caption "en-1" 0 60 "Hello" "en" nle/default-caption-style)
