@@ -42,6 +42,7 @@
                              :delivery/sample-peak-ceiling-db -1.0})
 (def default-color-pipeline {:color/input-space :media-native :color/output-space :srgb
                              :color/exposure-stops 0.0 :color/contrast 1.0 :color/saturation 1.0})
+(def default-caption-style {:caption/position :bottom :caption/align :center :caption/font-scale 1.0})
 (defn clamp-db [db] (max -12.0 (min 12.0 (or db 0.0))))
 (defn normalize-eq [eq]
   {:low-db (clamp-db (:low-db eq)) :mid-db (clamp-db (:mid-db eq)) :high-db (clamp-db (:high-db eq))})
@@ -88,14 +89,21 @@
       :color/contrast (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
       :color/saturation (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
       p)))
-(defn add-caption [p caption-id start-frame end-frame text]
+(defn normalize-caption-style [style]
+  {:caption/position (if (contains? #{:top :bottom} (:caption/position style)) (:caption/position style) :bottom)
+   :caption/align (if (contains? #{:left :center :right} (:caption/align style)) (:caption/align style) :center)
+   :caption/font-scale (clamp 0.5 2.0 (or (:caption/font-scale style) 1.0))})
+(defn add-caption
+  ([p caption-id start-frame end-frame text]
+   (add-caption p caption-id start-frame end-frame text default-caption-style))
+  ([p caption-id start-frame end-frame text style]
   (if (some #(= caption-id (:caption/id %)) (:project/captions p))
     p
     (update p :project/captions
             #(->> (conj (vec %) {:caption/id caption-id :caption/start-frame (max 0 start-frame)
                                  :caption/end-frame (max (inc (max 0 start-frame)) end-frame)
-                                 :caption/text (str text)})
-                  (sort-by (juxt :caption/start-frame :caption/id)) vec))))
+                                 :caption/text (str text) :caption/style (normalize-caption-style style)})
+                  (sort-by (juxt :caption/start-frame :caption/id)) vec)))))
 (defn update-caption [p caption-id changes]
   (update p :project/captions
           #(->> % (mapv (fn [caption]
@@ -103,7 +111,8 @@
                             (let [candidate (merge caption changes) start (max 0 (:caption/start-frame candidate))]
                               (assoc candidate :caption/start-frame start
                                                :caption/end-frame (max (inc start) (:caption/end-frame candidate))
-                                               :caption/text (str (:caption/text candidate))))
+                                               :caption/text (str (:caption/text candidate))
+                                               :caption/style (normalize-caption-style (:caption/style candidate))))
                             caption)))
                 (sort-by (juxt :caption/start-frame :caption/id)) vec)))
 (defn captions-at-frame [p frame]
@@ -311,6 +320,8 @@
         :when (or (not (string? (:caption/id caption))) (str/blank? (:caption/id caption))
                   (boolean (re-find #"[\r\n]" (:caption/id caption)))
                   (not (string? (:caption/text caption))) (str/blank? (:caption/text caption))
+                  (and (:caption/style caption)
+                       (not= (:caption/style caption) (normalize-caption-style (:caption/style caption))))
                   (neg? (:caption/start-frame caption))
                   (not (< (:caption/start-frame caption) (:caption/end-frame caption))))]
     [:invalid-caption (:caption/id caption)])

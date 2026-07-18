@@ -1,4 +1,5 @@
-(ns kami.app-nle.core-test (:require [clojure.test :refer [deftest is]] [kami.app-nle.core :as nle]))
+(ns kami.app-nle.core-test (:require [clojure.test :refer [deftest is]] [clojure.string :as str]
+                                     [kami.app-nle.core :as nle]))
 (def p (nle/project {:project/tracks [{:track/id "v" :track/clips [{:clip/id "c" :clip/start-frame 0 :clip/in-frame 10 :clip/out-frame 110}]}]}))
 (deftest editing (is (= "00:00:02:00" (nle/timecode 60 30))) (is (= 100 (nle/duration-frames p)))
  (is (= 2 (count (get-in (nle/split-clip p "c" 40 "c-b") [:project/tracks 0 :track/clips])))) (is (empty? (nle/validate-project p))))
@@ -133,6 +134,21 @@
            (nle/validate-project (update captioned :project/captions conj (first (:project/captions captioned))))))
     (is (= [[:invalid-caption "cap-1"]]
            (nle/validate-project (assoc-in captioned [:project/captions 0 :caption/end-frame] 10))))))
+(deftest styled-multiline-caption-contract
+  (let [captioned (nle/add-caption p "styled" 0 60 "First line\nSecond line"
+                                   {:caption/position :top :caption/align :left :caption/font-scale 1.5})
+        caption (first (:project/captions captioned))
+        clamped (nle/update-caption captioned "styled"
+                                    {:caption/style {:caption/position :invalid :caption/align :right
+                                                     :caption/font-scale 9}})]
+    (is (= {:caption/position :top :caption/align :left :caption/font-scale 1.5}
+           (:caption/style caption)))
+    (is (= {:caption/position :bottom :caption/align :right :caption/font-scale 2.0}
+           (get-in clamped [:project/captions 0 :caption/style])))
+    (is (str/includes? (nle/webvtt captioned) "First line\nSecond line"))
+    (is (empty? (nle/validate-project captioned)))
+    (is (= [[:invalid-caption "styled"]]
+           (nle/validate-project (assoc-in captioned [:project/captions 0 :caption/style :caption/font-scale] 4))))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))
