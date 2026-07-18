@@ -6,7 +6,7 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :frame 105 :playing? false :selected "wide" :assets {} :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
@@ -311,14 +311,68 @@
         (.start recorder 250)
         (-> (play-segments! segments) (.then #(.stop recorder))
             (.catch (fn [error] (js/console.error error) (.stop recorder))))))))
-(defn clip-view [c total] [:button.clip {:class (when (= (:selected @state) (:clip/id c)) "selected") :style {:left (str (* 100 (/ (:clip/start-frame c) total)) "%") :width (str (* 100 (/ (- (:clip/out-frame c) (:clip/in-frame c)) total)) "%") :background (:clip/color c)} :on-click #(swap! state assoc :selected (:clip/id c) :frame (:clip/start-frame c))} (:clip/name c)])
+(declare move-trim! finish-trim! cancel-trim!)
+(defn remove-trim-listeners! []
+  (.removeEventListener js/window "pointermove" move-trim!)
+  (.removeEventListener js/window "pointerup" finish-trim!)
+  (.removeEventListener js/window "pointercancel" cancel-trim!))
+(defn start-trim! [event clip edge total]
+  (.preventDefault event) (.stopPropagation event)
+  (let [target (.-currentTarget event) lane (.closest target ".lane") rect (.getBoundingClientRect lane)]
+    (try (.setPointerCapture target (.-pointerId event)) (catch :default _ nil))
+    (.addEventListener js/window "pointermove" move-trim!)
+    (.addEventListener js/window "pointerup" finish-trim!)
+    (.addEventListener js/window "pointercancel" cancel-trim!)
+    (swap! state assoc :selected (:clip/id clip) :trim-preview (:project @state)
+           :trim-drag {:pointer-id (.-pointerId event) :clip-id (:clip/id clip) :edge edge
+                       :origin-x (.-clientX event) :lane-width (.-width rect) :total total
+                       :base-project (:project @state)})))
+(defn move-trim! [event]
+  (when-let [{:keys [pointer-id clip-id edge origin-x lane-width total base-project]} (:trim-drag @state)]
+    (when (= pointer-id (.-pointerId event))
+      (.preventDefault event)
+      (let [delta (js/Math.round (* (/ (- (.-clientX event) origin-x) lane-width) total))]
+        (swap! state assoc :trim-preview (nle/trim-edge base-project clip-id edge delta))))))
+(defn finish-trim! [event]
+  (when (= (.-pointerId event) (get-in @state [:trim-drag :pointer-id]))
+    (.preventDefault event)
+    (let [preview (:trim-preview @state)]
+      (remove-trim-listeners!)
+      (swap! state assoc :project preview :trim-preview nil :trim-drag nil))))
+(defn cancel-trim! [event]
+  (when (= (.-pointerId event) (get-in @state [:trim-drag :pointer-id]))
+    (remove-trim-listeners!)
+    (swap! state assoc :trim-preview nil :trim-drag nil)))
+(defn key-trim! [event clip edge]
+  (when-let [delta ({"ArrowLeft" -1 "ArrowRight" 1} (.-key event))]
+    (.preventDefault event) (.stopPropagation event)
+    (swap! state update :project nle/trim-edge (:clip/id clip) edge delta)))
+(defn clip-view [c total]
+  [:div.clip {:class (when (= (:selected @state) (:clip/id c)) "selected")
+              :role "button" :tab-index 0 :aria-label (str "Select clip " (:clip/name c))
+              :style {:left (str (* 100 (/ (:clip/start-frame c) total)) "%")
+                      :width (str (* 100 (/ (- (:clip/out-frame c) (:clip/in-frame c)) total)) "%")
+                      :background (:clip/color c)}
+              :on-click #(swap! state assoc :selected (:clip/id c) :frame (:clip/start-frame c))
+              :on-key-down #(when (#{"Enter" " "} (.-key %)) (swap! state assoc :selected (:clip/id c) :frame (:clip/start-frame c)))}
+   [:span.trim-handle.left {:role "slider" :tab-index 0 :aria-label (str "Trim in " (:clip/name c))
+                            :aria-valuemin 0 :aria-valuemax (dec (:clip/out-frame c)) :aria-valuenow (:clip/in-frame c)
+                            :on-key-down #(key-trim! % c :in)
+                            :on-pointer-down #(start-trim! % c :in total)}]
+   [:span.clip-name (:clip/name c)]
+   [:span.trim-handle.right {:role "slider" :tab-index 0 :aria-label (str "Trim out " (:clip/name c))
+                             :aria-valuemin (inc (:clip/in-frame c)) :aria-valuemax 999999 :aria-valuenow (:clip/out-frame c)
+                             :on-key-down #(key-trim! % c :out)
+                             :on-pointer-down #(start-trim! % c :out total)}]])
 (defn selected-clip [project id] (some #(when (= id (:clip/id %)) %) (mapcat :track/clips (:project/tracks project))))
 (defn next-video-clip [project id]
   (second (drop-while #(not= id (:clip/id %)) (nle/video-clips project))))
 (defn edit-trim! [clip k value]
   (let [in-frame (if (= k :in) value (:clip/in-frame clip)) out-frame (if (= k :out) value (:clip/out-frame clip))]
     (swap! state update :project nle/trim-clip (:clip/id clip) in-frame out-frame)))
-(defn app [] (let [{:keys [project frame playing? selected decoded? assets effect exporting?]} @state total (max 300 (nle/duration-frames project)) fps (:project/fps project)
+(defn app [] (let [{:keys [frame playing? selected decoded? assets effect exporting?]} @state
+                    project (or (:trim-preview @state) (:project @state))
+                    total (max 300 (nle/duration-frames project)) fps (:project/fps project)
                     missing (nle/missing-asset-ids project (keys assets))]
  [:main [:header [:div [:small "KOTOBA-LANG / VIDEO"] [:h1 "KAMI NLE"]] [:div.transport [:button.primary {:on-click toggle-play! :disabled (not decoded?)} (if playing? "❚❚ Pause" "▶ Play decoded media")] [:output (nle/timecode frame fps)]]]
   [:section.workspace [:aside [:h2 "Project bin"] [:label.import "Import / relink V1 videos" [:input {:type "file" :accept "video/*" :multiple true :aria-label "Import or relink NLE videos" :on-change load-media!}]] (if (seq assets) (for [[id asset] assets] ^{:key id} [:div.asset (str "🎞 " id " • " (:name asset))]) [:div.asset "No media loaded"]) [:label "Effect" [:select {:value (name effect) :on-change #(swap! state assoc :effect (keyword (.. % -target -value)))} [:option {:value "none"} "None"] [:option {:value "cinema"} "Cinema"] [:option {:value "mono"} "Monochrome"] [:option {:value "dream"} "Dream"]]]
