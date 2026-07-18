@@ -1,5 +1,6 @@
 (ns kami.app-nle.ui
-  (:require [reagent.core :as r] [reagent.dom.client :as rdom] [cljs.reader :as reader] [kami.app-nle.core :as nle]
+  (:require [reagent.core :as r] [reagent.dom.client :as rdom] [cljs.reader :as reader] [clojure.string :as str]
+            [kami.app-nle.core :as nle]
             [kami.app-nle.cache :as cache]
             ["fflate" :refer [zipSync unzipSync strToU8 strFromU8]]))
 
@@ -7,7 +8,7 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :caption-text "" :caption-duration-frames 60 :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :caption-text "" :caption-duration-frames 60 :caption-position :bottom :caption-align :center :caption-font-scale 1.0 :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
@@ -117,13 +118,24 @@
           (set! (.-globalAlpha ctx) progress) (.drawImage ctx overlay 0 0 (.-width c) (.-height c)))
         (set! (.-filter ctx) "none") (set! (.-globalAlpha ctx) 1)
         (doseq [[index caption] (map-indexed vector (nle/captions-at-frame (:project @state) caption-frame))]
-          (let [text (:caption/text caption) font-size (max 18 (js/Math.round (* (.-height c) 0.055)))
-                y (- (.-height c) (* (+ 1 index) (* font-size 1.45)))]
-            (set! (.-font ctx) (str "600 " font-size "px sans-serif")) (set! (.-textAlign ctx) "center")
-            (let [width (+ 24 (.-width (.measureText ctx text)))]
+          (let [style (nle/normalize-caption-style (:caption/style caption))
+                lines (str/split (:caption/text caption) #"\r?\n")
+                font-size (max 18 (js/Math.round (* (.-height c) 0.055 (:caption/font-scale style))))
+                line-height (* font-size 1.25) safe-x (* (.-width c) 0.05) safe-y (* (.-height c) 0.05)
+                align (:caption/align style) x (case align :left safe-x :right (- (.-width c) safe-x) (/ (.-width c) 2))
+                block-height (* (count lines) line-height)
+                base-y (if (= :top (:caption/position style))
+                         (+ safe-y font-size (* index (+ block-height (* font-size 0.5))))
+                         (- (.-height c) safe-y block-height (* index (+ block-height (* font-size 0.5)))))]
+            (set! (.-font ctx) (str "600 " font-size "px sans-serif"))
+            (set! (.-textAlign ctx) (name align))
+            (let [widths (mapv #(.-width (.measureText ctx %)) lines) width (+ 24 (apply max 0 widths))
+                  box-x (case align :left (- x 12) :right (- x width -12) (- x (/ width 2)))]
               (set! (.-fillStyle ctx) "rgba(0,0,0,0.72)")
-              (.fillRect ctx (- (/ (.-width c) 2) (/ width 2)) (- y font-size) width (* font-size 1.3)))
-            (set! (.-fillStyle ctx) "white") (.fillText ctx text (/ (.-width c) 2) y)))
+              (.fillRect ctx box-x (- base-y font-size) width (+ block-height (* font-size 0.25)))
+              (set! (.-fillStyle ctx) "white")
+              (doseq [[line-index line] (map-indexed vector lines)]
+                (.fillText ctx line x (+ base-y (* line-index line-height)))))))
         (set! (.-globalAlpha ctx) 1)
         (swap! state assoc :frame caption-frame
                :audio-meter-db (audio-meter-db)))
@@ -281,7 +293,9 @@
 (defn add-caption-at-playhead! []
   (let [text (:caption-text @state) start (:frame @state) duration (:caption-duration-frames @state)]
     (when (seq text)
-      (swap! state update :project nle/add-caption (str "caption:" (js/Date.now)) start (+ start duration) text)
+      (swap! state update :project nle/add-caption (str "caption:" (js/Date.now)) start (+ start duration) text
+             {:caption/position (:caption-position @state) :caption/align (:caption-align @state)
+              :caption/font-scale (:caption-font-scale @state)})
       (swap! state assoc :caption-text ""))))
 (defn export-webvtt! []
   (download-file! (js/Blob. #js [(nle/webvtt (:project @state))] #js {:type "text/vtt;charset=utf-8"})
@@ -790,12 +804,23 @@
                                           :value (get color key) :aria-label label
                                           :on-change #(swap! state update :project nle/set-color-pipeline key
                                                              (js/parseFloat (.. % -target -value)))}]])
-    [:label "Caption text" [:input {:value (:caption-text @state) :aria-label "New caption text"
+    [:label "Caption text" [:textarea {:value (:caption-text @state) :aria-label "New caption text"
                                       :on-change #(swap! state assoc :caption-text (.. % -target -value))}]]
     [:label "Caption frames" [:input {:type "number" :min 1 :step 1 :value (:caption-duration-frames @state)
                                         :aria-label "New caption duration frames"
                                         :on-change #(swap! state assoc :caption-duration-frames
                                                            (max 1 (js/parseInt (.. % -target -value))))}]]
+    [:label "Caption position" [:select {:value (name (:caption-position @state)) :aria-label "New caption position"
+                                           :on-change #(swap! state assoc :caption-position (keyword (.. % -target -value)))}
+                                [:option {:value "bottom"} "Bottom"] [:option {:value "top"} "Top"]]]
+    [:label "Caption alignment" [:select {:value (name (:caption-align @state)) :aria-label "New caption alignment"
+                                            :on-change #(swap! state assoc :caption-align (keyword (.. % -target -value)))}
+                                 [:option {:value "left"} "Left"] [:option {:value "center"} "Center"]
+                                 [:option {:value "right"} "Right"]]]
+    [:label "Caption font scale" [:input {:type "number" :min 0.5 :max 2 :step 0.1
+                                            :value (:caption-font-scale @state) :aria-label "New caption font scale"
+                                            :on-change #(swap! state assoc :caption-font-scale
+                                                               (js/parseFloat (.. % -target -value)))}]]
     [:button {:on-click add-caption-at-playhead! :disabled (empty? (:caption-text @state))} "Add caption at playhead"]
     (for [caption (:project/captions project)]
       ^{:key (:caption/id caption)} [:div.asset
@@ -809,7 +834,19 @@
        [:input {:type "number" :min 1 :value (:caption/end-frame caption)
                 :aria-label (str (:caption/id caption) " end frame")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
-                                   {:caption/end-frame (js/parseInt (.. % -target -value))})}]])
+                                   {:caption/end-frame (js/parseInt (.. % -target -value))})}]
+       [:select {:value (name (:caption/position (nle/normalize-caption-style (:caption/style caption))))
+                 :aria-label (str (:caption/id caption) " position")
+                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
+                                    {:caption/style (assoc (nle/normalize-caption-style (:caption/style caption))
+                                                           :caption/position (keyword (.. % -target -value)))})}
+        [:option {:value "bottom"} "Bottom"] [:option {:value "top"} "Top"]]
+       [:select {:value (name (:caption/align (nle/normalize-caption-style (:caption/style caption))))
+                 :aria-label (str (:caption/id caption) " alignment")
+                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
+                                    {:caption/style (assoc (nle/normalize-caption-style (:caption/style caption))
+                                                           :caption/align (keyword (.. % -target -value)))})}
+        [:option {:value "left"} "Left"] [:option {:value "center"} "Center"] [:option {:value "right"} "Right"]]])
     [:button {:on-click export-webvtt! :disabled (empty? (:project/captions project))} "Export WebVTT"]
     (when-let [clip (selected-clip project selected)]
       [:div.asset [:strong (str "Edit • " (:clip/name clip))]

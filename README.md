@@ -4,7 +4,7 @@ EDN-native browser non-linear video editor for `kotoba-lang`. It owns frame/time
 
 The production path is browser-native: multiple imported videos are bound to timeline clips through `:clip/source-id`. Imported/package media is deduplicated into a versioned IndexedDB cache by SHA-256; recovery rehashes complete blobs before rebuilding object URLs, deletes corrupt hits, and exposes an explicit clear-cache control. Accessible in/out handles provide direct pointer and keyboard trimming; drag movement previews in runtime state, pointer up commits one project generation, and pointer cancel discards it. Projects also travel with media in verified `.kami.zip` packages. Every project edit enters persistent bounded undo/redo; decoded media, cache state, drag previews, meters and transport are excluded.
 
-Project-authoritative captions are rendered onto the decoded preview canvas, so production capture contains the same burn-in, and are also exported as deterministic WebVTT sidecars. Styled/localized TTML and IMSC delivery remains an explicit commercial-product gap.
+Project-authoritative captions support multiline text, top/bottom position, left/center/right alignment and bounded font scale inside a 5% title-safe area. They are rendered onto the decoded preview canvas, so production capture contains the same burn-in, and are also exported as deterministic multiline WebVTT sidecars. Rich typography, localization workflows, TTML and IMSC delivery remain explicit commercial-product gaps.
 
 ## Run
 
