@@ -43,3 +43,7 @@
          ((juxt :profile/mime :profile/video-bps) (nle/export-profile p))))
   (is (= "video/webm;codecs=vp9,opus"
          (:profile/mime (nle/export-profile (assoc p :project/export-profile :master))))))
+(deftest validated-project-persistence
+  (is (= p (nle/accept-project p)))
+  (is (nil? (nle/accept-project (assoc p :project/schema "foreign/v1"))))
+  (is (nil? (nle/accept-project [:not :a :project]))))

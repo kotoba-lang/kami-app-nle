@@ -69,6 +69,8 @@
                   tracks))))
 (defn validate-project [p] (vec (concat (when-not (= schema (:project/schema p)) [:unsupported-schema]) (when-not (pos-int? (:project/fps p)) [:invalid-fps])
   (for [c (mapcat :track/clips (:project/tracks p)) :when (or (neg? (:clip/start-frame c)) (>= (:clip/in-frame c) (:clip/out-frame c)))] [:invalid-clip (:clip/id c)]))))
+(defn accept-project [value]
+  (when (and (map? value) (empty? (validate-project value))) value))
 
 (defn video-clips [p]
   (->> (:project/tracks p) (filter #(= :video (:track/type %))) (mapcat :track/clips)

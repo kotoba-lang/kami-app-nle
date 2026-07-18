@@ -1,11 +1,11 @@
 (ns kami.app-nle.ui
-  (:require [reagent.core :as r] [reagent.dom.client :as rdom] [kami.app-nle.core :as nle]))
+  (:require [reagent.core :as r] [reagent.dom.client :as rdom] [cljs.reader :as reader] [kami.app-nle.core :as nle]))
 
 (def sample (nle/project {:project/id "demo-cut" :project/name "海辺の予告編" :project/fps 30
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :frame 105 :playing? false :selected "wide" :assets {} :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :frame 105 :playing? false :selected "wide" :assets {} :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
@@ -45,6 +45,22 @@
 (defn media-ready! [] (let [v (primary-video) c @canvas-node] (set! (.-width c) (or (.-videoWidth v) 1280)) (set! (.-height c) (or (.-videoHeight v) 720)) (set! (.-currentTime v) (/ (:pending-source-frame @state) (get-in @state [:project :project/fps]))) (swap! state assoc :decoded? true) (draw-frame!)))
 (defn toggle-play! [] (when (:decoded? @state) (if (:playing? @state) (.pause (primary-video)) (.play (primary-video))) (swap! state update :playing? not)))
 (defn download-blob! [blob] (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")] (set! (.-href a) url) (set! (.-download a) "kami-nle-master.webm") (.click a) (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
+(defn download-project! []
+  (let [blob (js/Blob. #js [(pr-str (:project @state))] #js {:type "application/edn"})
+        url (js/URL.createObjectURL blob) a (.createElement js/document "a")]
+    (set! (.-href a) url) (set! (.-download a) "kami-nle-project.edn") (.click a)
+    (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
+(defn load-project! [event]
+  (when-let [file (aget (.. event -target -files) 0)]
+    (-> (.text file)
+        (.then (fn [text]
+                 (try
+                   (if-let [project (nle/accept-project (reader/read-string text))]
+                     (let [first-clip (first (nle/video-clips project))]
+                       (swap! state assoc :project project :selected (:clip/id first-clip)
+                              :frame (or (:clip/start-frame first-clip) 0) :decoded? false :playing? false :project-error nil))
+                     (swap! state assoc :project-error "Unsupported or invalid NLE project"))
+                   (catch :default error (swap! state assoc :project-error (.-message error)))))))))
 (defn recorder-options [project]
   (let [profile (nle/export-profile project) preferred (:profile/mime profile)
         fallback "video/webm;codecs=vp8,opus" mime (if (.isTypeSupported js/MediaRecorder preferred) preferred fallback)]
@@ -175,7 +191,11 @@
                                        :on-change #(swap! state assoc-in [:project :project/export-profile] (keyword (.. % -target -value)))}
                               (for [[id profile] nle/export-profiles] ^{:key id} [:option {:value (name id)} (:profile/name profile)])]]
     [:meter {:min -60 :max 0 :value (max -60 (:audio-meter-db @state)) :title (str (.toFixed (:audio-meter-db @state) 1) " dBFS")}]
-    [:button {:on-click export-webm! :disabled (or (not decoded?) exporting?)} (if exporting? "Encoding WebM…" "Export WebM")] [:button {:on-click #(js/navigator.clipboard.writeText (pr-str project))} "Copy project EDN"]]
+    [:button {:on-click export-webm! :disabled (or (not decoded?) exporting?)} (if exporting? "Encoding WebM…" "Export WebM")]
+    [:button {:on-click download-project!} "Save project EDN"]
+    [:label "Open project EDN" [:input {:type "file" :accept ".edn,application/edn" :aria-label "Open NLE project EDN" :on-change load-project!}]]
+    [:button {:on-click #(js/navigator.clipboard.writeText (pr-str project))} "Copy project EDN"]]
+   (when-let [error (:project-error @state)] [:aside [:strong (str "Project error: " error)]])
    [:div.monitor [:video {:ref #(reset! video-a-node %) :style {:display "none"} :plays-inline true :on-loaded-metadata media-ready! :on-pause #(swap! state assoc :playing? false)}]
     [:video {:ref #(reset! video-b-node %) :style {:display "none"} :plays-inline true}]
     [:div.frame [:span "PROGRAM"] [:strong (nle/timecode frame fps)] [:canvas {:ref #(reset! canvas-node %) :aria-label "Decoded video preview"}] (when-not decoded? [:div.scene "IMPORT VIDEO"])] [:div.tools [:button {:disabled (nil? selected) :on-click #(swap! state update :project nle/split-clip selected frame (str selected "-b"))} "Split at playhead"] [:span (str fps " fps • " total " frames • " (name effect))]]]]
