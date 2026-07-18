@@ -78,3 +78,13 @@
                       (:history (nle/recover-workspace
                                  (nle/recovery-envelope p2 {:history/past (vec (repeat 70 p))
                                                             :history/future []})))))))))
+(deftest portable-media-package-contract
+  (let [sha (apply str (repeat 64 "a"))
+        packaged (nle/register-asset p "asset:7" "scene.webm" sha)
+        media {"asset:7" {:entry/name "media/0" :media/name "scene.webm" :media/type "video/webm" :media/sha256 sha}}
+        manifest (nle/package-manifest packaged media)]
+    (is (= {:project packaged :media media} (nle/accept-package packaged manifest #{"media/0"})))
+    (is (nil? (nle/accept-package packaged manifest #{})))
+    (is (nil? (nle/accept-package packaged (assoc-in manifest [:package/media "asset:7" :media/sha256]
+                                                      (apply str (repeat 64 "b"))) #{"media/0"})))
+    (is (= "media/7" (nle/package-entry-name 7)))))

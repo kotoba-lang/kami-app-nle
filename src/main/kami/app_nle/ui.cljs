@@ -1,5 +1,6 @@
 (ns kami.app-nle.ui
-  (:require [reagent.core :as r] [reagent.dom.client :as rdom] [cljs.reader :as reader] [kami.app-nle.core :as nle]))
+  (:require [reagent.core :as r] [reagent.dom.client :as rdom] [cljs.reader :as reader] [kami.app-nle.core :as nle]
+            ["fflate" :refer [zipSync unzipSync strToU8 strFromU8]]))
 
 (def sample (nle/project {:project/id "demo-cut" :project/name "海辺の予告編" :project/fps 30
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
@@ -60,7 +61,7 @@
                                                             (nle/next-asset-id (:project @state)))
                                               url (js/URL.createObjectURL file)]
                                           (when-let [old-url (get-in @state [:assets source-id :url])] (js/URL.revokeObjectURL old-url))
-                                          (swap! state (fn [s] (-> s (assoc-in [:assets source-id] {:name (.-name file) :sha256 sha256 :url url})
+                                          (swap! state (fn [s] (-> s (assoc-in [:assets source-id] {:name (.-name file) :type (.-type file) :sha256 sha256 :blob file :url url})
                                                                     (update :project nle/register-asset source-id (.-name file) sha256)))))))))))
                 (js/Promise.resolve true) files)
         (.then #(when (seq files) (seek-frame! (:frame @state)))))))
@@ -72,6 +73,91 @@
         url (js/URL.createObjectURL blob) a (.createElement js/document "a")]
     (set! (.-href a) url) (set! (.-download a) "kami-nle-project.edn") (.click a)
     (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
+(defn download-file! [blob filename]
+  (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")]
+    (set! (.-href a) url) (set! (.-download a) filename) (.click a)
+    (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
+(defn export-package! []
+  (let [project (:project @state) asset-ids (sort (keys (:project/assets project)))
+        missing (vec (remove #(get-in @state [:assets % :blob]) asset-ids))
+        total (reduce + 0 (keep #(some-> (get-in @state [:assets % :blob]) .-size) asset-ids))]
+    (cond
+      (seq missing) (swap! state assoc :project-error (str "Relink media before packaging: " (pr-str missing)))
+      (> total nle/package-max-bytes) (swap! state assoc :project-error "Package media exceeds the 512 MiB browser limit")
+      :else
+      (-> (.all js/Promise
+                (clj->js
+                 (map-indexed
+                  (fn [index asset-id]
+                    (let [asset (get-in @state [:assets asset-id]) blob (:blob asset)]
+                      (-> (.all js/Promise #js [(.arrayBuffer blob) (sha256-file! blob)])
+                          (.then (fn [values]
+                                   {:asset-id asset-id :entry-name (nle/package-entry-name index)
+                                    :name (:name asset) :type (or (:type asset) (.-type blob) "application/octet-stream")
+                                    :sha256 (aget values 1) :bytes (js/Uint8Array. (aget values 0))})))))
+                  asset-ids)))
+          (.then
+           (fn [values]
+             (let [items (array-seq values)
+                   packaged-project (reduce (fn [p {:keys [asset-id sha256]}]
+                                              (assoc-in p [:project/assets asset-id :asset/sha256] sha256)) project items)
+                   media (into {} (map (fn [{:keys [asset-id entry-name name type sha256]}]
+                                         [asset-id {:entry/name entry-name :media/name name :media/type type :media/sha256 sha256}]) items))
+                   entries #js {}]
+               (aset entries "project.edn" (strToU8 (pr-str packaged-project)))
+               (aset entries "media.edn" (strToU8 (pr-str (nle/package-manifest packaged-project media))))
+               (doseq [{:keys [entry-name bytes]} items] (aset entries entry-name bytes))
+               (download-file! (js/Blob. #js [(zipSync entries #js {:level 0})] #js {:type "application/zip"})
+                               "kami-nle-package.kami.zip")
+               (swap! state assoc :project-error nil))))
+          (.catch #(swap! state assoc :project-error (str "Package export failed: " (.-message %))))))))
+(defn unzip-package [array-buffer]
+  (let [expanded-bytes (atom 0)]
+    (unzipSync (js/Uint8Array. array-buffer)
+               #js {:filter (fn [entry]
+                              (swap! expanded-bytes + (.-originalSize entry))
+                              (when (> @expanded-bytes nle/package-max-bytes)
+                                (throw (js/Error. "Expanded package exceeds the 512 MiB browser limit")))
+                              true)})))
+(defn open-package! [event]
+  (when-let [file (aget (.. event -target -files) 0)]
+    (if (> (.-size file) nle/package-max-bytes)
+      (swap! state assoc :project-error "Package exceeds the 512 MiB browser limit")
+      (-> (.arrayBuffer file)
+          (.then
+           (fn [array-buffer]
+             (let [entries (unzip-package array-buffer) names (set (js->clj (js/Object.keys entries)))
+                   project-entry (aget entries "project.edn") manifest-entry (aget entries "media.edn")]
+               (when-not (and project-entry manifest-entry) (throw (js/Error. "Package metadata is missing")))
+               (let [project (reader/read-string (strFromU8 project-entry))
+                     manifest (reader/read-string (strFromU8 manifest-entry))
+                     accepted (nle/accept-package project manifest names)]
+                 (when-not accepted (throw (js/Error. "Package contract is invalid")))
+                 (-> (.all js/Promise
+                           (clj->js
+                            (map (fn [[asset-id descriptor]]
+                                   (let [blob (js/Blob. #js [(aget entries (:entry/name descriptor))]
+                                                        #js {:type (:media/type descriptor)})]
+                                     (-> (sha256-file! blob)
+                                         (.then (fn [sha256]
+                                                  (when-not (= sha256 (:media/sha256 descriptor))
+                                                    (throw (js/Error. (str "Media checksum mismatch: " asset-id))))
+                                                  {:asset-id asset-id :descriptor descriptor :blob blob})))))
+                                 (:media accepted))))
+                     (.then (fn [values] {:project (:project accepted) :items (array-seq values)})))))))
+          (.then
+           (fn [{:keys [project items]}]
+             (doseq [[_ asset] (:assets @state)] (when-let [url (:url asset)] (js/URL.revokeObjectURL url)))
+             (let [first-clip (first (nle/video-clips project))
+                   assets (into {} (map (fn [{:keys [asset-id descriptor blob]}]
+                                          [asset-id {:name (:media/name descriptor) :type (:media/type descriptor)
+                                                     :sha256 (:media/sha256 descriptor) :blob blob
+                                                     :url (js/URL.createObjectURL blob)}]) items))]
+               (swap! state assoc :project project :selected (:clip/id first-clip)
+                      :frame (or (:clip/start-frame first-clip) 0) :decoded? false :playing? false
+                      :project-error nil :assets assets)
+               (seek-frame! (:frame @state)))))
+          (.catch #(swap! state assoc :project-error (str "Package import failed: " (.-message %))))))))
 (defn load-project! [event]
   (when-let [file (aget (.. event -target -files) 0)]
     (-> (.text file)
@@ -257,6 +343,8 @@
     [:button {:on-click export-webm! :disabled (or (not decoded?) exporting?)} (if exporting? "Encoding WebM…" "Export WebM")]
     [:button {:on-click download-project!} "Save project EDN"]
     [:label "Open project EDN" [:input {:type "file" :accept ".edn,application/edn" :aria-label "Open NLE project EDN" :on-change load-project!}]]
+    [:button {:on-click export-package!} "Package project + media"]
+    [:label "Open media package" [:input {:type "file" :accept ".zip,.kami.zip,application/zip" :aria-label "Open NLE media package" :on-change open-package!}]]
     [:button {:on-click undo! :disabled (empty? (get-in @state [:history :history/past])) :aria-label "Undo project edit"} "↶ Undo"]
     [:button {:on-click redo! :disabled (empty? (get-in @state [:history :history/future])) :aria-label "Redo project edit"} "↷ Redo"]
     [:button {:on-click #(js/navigator.clipboard.writeText (pr-str project))} "Copy project EDN"]]
