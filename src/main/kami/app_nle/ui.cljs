@@ -5,13 +5,20 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :frame 105 :playing? false :selected "wide" :assets {} :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :primary-slot :a}))
+(defonce state (r/atom {:project sample :frame 105 :playing? false :selected "wide" :assets {} :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
 (def filters {:none "none" :cinema "contrast(1.18) saturate(1.22)" :mono "grayscale(1) contrast(1.12)" :dream "saturate(1.35) brightness(1.08) blur(1px)"})
 (defn primary-video [] (if (= :a (:primary-slot @state)) @video-a-node @video-b-node))
 (defn secondary-video [] (if (= :a (:primary-slot @state)) @video-b-node @video-a-node))
+(defn audio-meter-db []
+  (if-let [analyser (:analyser @export-audio)]
+    (let [samples (js/Float32Array. (.-fftSize analyser))]
+      (.getFloatTimeDomainData analyser samples)
+      (let [sum (reduce (fn [acc x] (+ acc (* x x))) 0 (array-seq samples))
+            rms (js/Math.sqrt (/ sum (.-length samples)))]
+        (if (pos? rms) (* 20 (/ (js/Math.log rms) (js/Math.log 10))) -96))) -96))
 (defn draw-frame! []
   (when (and (primary-video) @canvas-node)
     (let [v (primary-video) overlay (secondary-video) c @canvas-node ctx (.getContext c "2d")
@@ -29,7 +36,8 @@
         (when (and progress overlay (>= (.-readyState overlay) 2))
           (set! (.-globalAlpha ctx) progress) (.drawImage ctx overlay 0 0 (.-width c) (.-height c)))
         (set! (.-globalAlpha ctx) 1)
-        (swap! state assoc :frame (js/Math.floor (* (.-currentTime v) (get-in @state [:project :project/fps])))))
+        (swap! state assoc :frame (js/Math.floor (* (.-currentTime v) (get-in @state [:project :project/fps])))
+               :audio-meter-db (audio-meter-db)))
       (js/requestAnimationFrame draw-frame!))))
 (defn activate-source! [source-id source-frame] (when-let [{:keys [url]} (get-in @state [:assets source-id])] (let [video (primary-video)] (swap! state assoc :pending-source-frame source-frame :active-source source-id) (if (not= url (.-src video)) (do (set! (.-src video) url) (.load video)) (set! (.-currentTime video) (/ source-frame (get-in @state [:project :project/fps])))))))
 (defn seek-frame! [frame] (when-let [clip (nle/clip-at-frame (:project @state) frame)] (activate-source! (:clip/source-id clip) (+ (:clip/in-frame clip) (- frame (:clip/start-frame clip))))))
@@ -42,19 +50,23 @@
       (let [Ctor (or (.-AudioContext js/window) (.-webkitAudioContext js/window)) ctx (new Ctor)
             source-a (.createMediaElementSource ctx @video-a-node)
             source-b (.createMediaElementSource ctx @video-b-node)
-            gain-a (.createGain ctx) gain-b (.createGain ctx)
+            gain-a (.createGain ctx) gain-b (.createGain ctx) master (.createGain ctx) analyser (.createAnalyser ctx)
             destination (.createMediaStreamDestination ctx)]
         (set! (.. gain-a -gain -value) 1) (set! (.. gain-b -gain -value) 0)
+        (set! (.. master -gain -value) (:master-gain @state)) (set! (.-fftSize analyser) 512)
         (.connect source-a gain-a) (.connect source-b gain-b)
-        (.connect gain-a destination) (.connect gain-b destination)
-        (.connect gain-a (.-destination ctx)) (.connect gain-b (.-destination ctx))
+        (.connect gain-a master) (.connect gain-b master) (.connect master analyser)
+        (.connect analyser destination) (.connect analyser (.-destination ctx))
         (reset! export-audio {:context ctx :destination destination :node-a @video-a-node :node-b @video-b-node
-                              :gain-a gain-a :gain-b gain-b}))))
+                              :gain-a gain-a :gain-b gain-b :master master :analyser analyser}))))
 (defn gain-for-video [video]
   (let [{:keys [node-a gain-a gain-b]} @export-audio] (if (identical? video node-a) gain-a gain-b)))
-(defn set-primary-audio! []
+(defn set-master-gain! [gain]
+  (swap! state assoc :master-gain gain)
+  (when-let [master (:master @export-audio)] (set! (.. master -gain -value) gain)))
+(defn set-primary-audio! [segment]
   (when @export-audio
-    (set! (.-value (.-gain (gain-for-video (primary-video)))) 1)
+    (set! (.-value (.-gain (gain-for-video (primary-video)))) (or (:segment/audio-gain segment) 1))
     (set! (.-value (.-gain (gain-for-video (secondary-video)))) 0)))
 (defn prepare-video! [video segment]
   (js/Promise.
@@ -90,9 +102,11 @@
                            (fn []
                              (let [ctx (:context @export-audio) now (.-currentTime ctx)
                                    primary-param (.-gain (gain-for-video (primary-video)))
-                                   secondary-param (.-gain (gain-for-video (secondary-video)))]
-                               (.setValueAtTime primary-param 1 now) (.linearRampToValueAtTime primary-param 0 (+ now dissolve-sec))
-                               (.setValueAtTime secondary-param 0 now) (.linearRampToValueAtTime secondary-param 1 (+ now dissolve-sec)))
+                                   secondary-param (.-gain (gain-for-video (secondary-video)))
+                                   primary-gain (or (:segment/audio-gain segment) 1)
+                                   secondary-gain (or (:segment/audio-gain next-segment) 1)]
+                               (.setValueAtTime primary-param primary-gain now) (.linearRampToValueAtTime primary-param 0 (+ now dissolve-sec))
+                               (.setValueAtTime secondary-param 0 now) (.linearRampToValueAtTime secondary-param secondary-gain (+ now dissolve-sec)))
                              (.play (secondary-video))
                              (swap! state assoc :dissolve {:started-ms (js/performance.now) :duration-ms (* 1000 dissolve-sec)}))
                            (* 1000 start-dissolve-sec))
@@ -100,7 +114,7 @@
                            (fn [] (.pause (primary-video)) (swap! state dissoc :dissolve) (swap-video-nodes!) (resolve true))
                            (* 1000 remaining-sec))))))
               (.then #(play-timeline-from! segments (inc index) dissolve-sec)))
-          (do (set-primary-audio!) (.play (primary-video))
+          (do (set-primary-audio! segment) (.play (primary-video))
               (js/Promise.
                (fn [resolve reject]
                  (js/setTimeout
@@ -123,7 +137,7 @@
             audio-track (first (array-seq (.getAudioTracks (.-stream destination))))
             _ (.addTrack stream audio-track)
             recorder (js/MediaRecorder. stream #js {:mimeType "video/webm;codecs=vp8,opus"}) chunks (array)]
-        (.resume context) (set-primary-audio!) (swap! state assoc :exporting? true :playing? true)
+        (.resume context) (set-master-gain! (:master-gain @state)) (set-primary-audio! (first segments)) (swap! state assoc :exporting? true :playing? true)
         (set! (.-ondataavailable recorder) #(when (pos? (.. % -data -size)) (.push chunks (.-data %))))
         (set! (.-onstop recorder) #(do (download-blob! (js/Blob. chunks #js {:type "video/webm"})) (swap! state dissoc :export-segment) (swap! state assoc :exporting? false :playing? false)))
         (.start recorder 250)
@@ -143,12 +157,17 @@
       [:div.asset [:strong (str "Edit • " (:clip/name clip))]
        [:label "Source in" [:input {:type "number" :min 0 :value (:clip/in-frame clip) :on-change #(edit-trim! clip :in (js/parseInt (.. % -target -value)))}]]
        [:label "Source out" [:input {:type "number" :min 1 :value (:clip/out-frame clip) :on-change #(edit-trim! clip :out (js/parseInt (.. % -target -value)))}]]
+       [:label "Clip audio" [:input {:type "range" :min 0 :max 2 :step 0.05 :value (or (:clip/audio-gain clip) 1)
+                                      :aria-label "Clip audio gain" :on-change #(swap! state update :project nle/set-clip-audio-gain (:clip/id clip) (js/parseFloat (.. % -target -value)))}]]
        [:label "Transition" [:select {:value (name (or (get-in clip [:clip/transition-out :transition/type]) :cut)) :on-change #(swap! state update :project nle/set-transition (:clip/id clip) (keyword (.. % -target -value)) 12)} [:option {:value "cut"} "Cut"] [:option {:value "fade"} "Fade to black"] [:option {:value "dissolve"} "Cross dissolve"]]]
        [:div.tools [:button {:on-click #(swap! state update :project nle/ripple-trim-out (:clip/id clip) (+ 5 (:clip/out-frame clip)))} "Ripple +5"]
         [:button {:on-click #(swap! state update :project nle/slip-clip (:clip/id clip) -5)} "Slip −5"]
         [:button {:on-click #(swap! state update :project nle/slip-clip (:clip/id clip) 5)} "Slip +5"]
         (when-let [right (next-video-clip project (:clip/id clip))]
           [:button {:on-click #(swap! state update :project nle/roll-cut (:clip/id clip) (:clip/id right) 5)} "Roll +5"])]] )
+    [:label "Master audio" [:input {:type "range" :min 0 :max 1.5 :step 0.05 :value (:master-gain @state) :aria-label "Master audio gain"
+                                     :on-change #(set-master-gain! (js/parseFloat (.. % -target -value)))}]]
+    [:meter {:min -60 :max 0 :value (max -60 (:audio-meter-db @state)) :title (str (.toFixed (:audio-meter-db @state) 1) " dBFS")}]
     [:button {:on-click export-webm! :disabled (or (not decoded?) exporting?)} (if exporting? "Encoding WebM…" "Export WebM")] [:button {:on-click #(js/navigator.clipboard.writeText (pr-str project))} "Copy project EDN"]]
    [:div.monitor [:video {:ref #(reset! video-a-node %) :style {:display "none"} :plays-inline true :on-loaded-metadata media-ready! :on-pause #(swap! state assoc :playing? false)}]
     [:video {:ref #(reset! video-b-node %) :style {:display "none"} :plays-inline true}]

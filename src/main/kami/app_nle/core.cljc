@@ -18,6 +18,8 @@
 (defn set-transition [p id transition-type duration-frames]
   (update-clip p id #(assoc % :clip/transition-out {:transition/type transition-type
                                                      :transition/duration-frames (max 0 duration-frames)})))
+(defn set-clip-audio-gain [p id gain]
+  (update-clip p id #(assoc % :clip/audio-gain (max 0 (min 2 gain)))))
 (defn ripple-trim-out [p id new-out]
   (let [target (some #(when (= id (:clip/id %)) %) (mapcat :track/clips (:project/tracks p)))
         delta (- new-out (:clip/out-frame target))]
@@ -77,6 +79,7 @@
              :segment/timeline-start-sec (/ (:clip/start-frame clip) fps)
              :segment/source-start-sec (/ (:clip/in-frame clip) fps)
              :segment/duration-sec (/ (- (:clip/out-frame clip) (:clip/in-frame clip)) fps)
+             :segment/audio-gain (or (:clip/audio-gain clip) 1.0)
              :segment/transition-out (:clip/transition-out clip)})
           (video-clips p))))
 

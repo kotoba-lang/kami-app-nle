@@ -7,7 +7,7 @@
         bound (assoc-in bound [:project/tracks 0 :track/clips 0 :clip/source-id] "asset:a")]
     (is (= "c" (:clip/id (nle/clip-at-frame bound 50))))
     (is (= [{:segment/clip-id "c" :segment/source-id "asset:a" :segment/timeline-start-sec 0
-             :segment/source-start-sec 1/3 :segment/duration-sec 10/3 :segment/transition-out nil}]
+             :segment/source-start-sec 1/3 :segment/duration-sec 10/3 :segment/audio-gain 1.0 :segment/transition-out nil}]
            (nle/render-segments bound)))))
 (deftest trim-transition-and-relations
   (let [base (nle/project {:project/fps 30 :project/tracks [{:track/id "v" :track/type :video
@@ -32,3 +32,9 @@
     (is (= [65 15 65] [(get-in roll [:project/tracks 0 :track/clips 0 :clip/out-frame])
                        (get-in roll [:project/tracks 0 :track/clips 1 :clip/in-frame])
                        (get-in roll [:project/tracks 0 :track/clips 1 :clip/start-frame])]))))
+(deftest production-audio-mix-authority
+  (let [bound (-> p (assoc-in [:project/tracks 0 :track/type] :video)
+                  (assoc-in [:project/tracks 0 :track/clips 0 :clip/source-id] "asset:a"))
+        mixed (nle/set-clip-audio-gain bound "c" 0.35)]
+    (is (= 0.35 (:segment/audio-gain (first (nle/render-segments mixed)))))
+    (is (= 2 (:clip/audio-gain (first (nle/video-clips (nle/set-clip-audio-gain bound "c" 9))))))))
