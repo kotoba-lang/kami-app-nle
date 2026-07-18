@@ -226,6 +226,17 @@
            (nle/validate-project (assoc-in reviewed [:project/captions 0 :caption/review-notes 0 :review/text] ""))))
     (is (= [[:invalid-caption "cue"]]
            (nle/validate-project (assoc-in reviewed [:project/captions 0 :caption/status-history 1 :status/at] 1000))))))
+(deftest assigned-reviewer-alone-can-approve
+  (let [base (-> (nle/project {})
+                 (nle/add-caption "cue" 0 60 "Ship" "en" nle/default-caption-style)
+                 (nle/set-caption-status "cue" :draft)
+                 (nle/set-caption-reviewer "cue" "mika"))
+        rejected (nle/set-caption-status base "cue" :approved "ken" 1000)
+        approved (nle/set-caption-status base "cue" :approved "mika" 1000)]
+    (is (= :draft (nle/caption-status (first (:project/captions rejected)))))
+    (is (= :approved (nle/caption-status (first (:project/captions approved)))))
+    (is (= "mika" (get-in approved [:project/captions 0 :caption/reviewer])))
+    (is (empty? (nle/validate-project approved)))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))

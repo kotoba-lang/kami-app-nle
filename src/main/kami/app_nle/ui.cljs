@@ -860,11 +860,17 @@
        [:input {:value (nle/caption-language caption) :aria-label (str (:caption/id caption) " language")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
                                    {:caption/language (.. % -target -value)})}]
+       [:input {:value (or (:caption/reviewer caption) "")
+                :placeholder "Assigned reviewer" :aria-label (str (:caption/id caption) " reviewer")
+                :on-change #(swap! state update :project nle/set-caption-reviewer (:caption/id caption)
+                                   (.. % -target -value))}]
        [:select {:value (name (nle/caption-status caption)) :aria-label (str (:caption/id caption) " status")
                  :on-change #(swap! state update :project nle/set-caption-status (:caption/id caption)
                                     (keyword (.. % -target -value)) (:review-author @state) (js/Date.now))}
         [:option {:value "draft"} "Draft"] [:option {:value "review"} "In review"]
-        [:option {:value "approved"} "Approved"]]
+        [:option {:value "approved"
+                  :disabled (and (:caption/reviewer caption)
+                                 (not= (:caption/reviewer caption) (:review-author @state)))} "Approved"]]
        [:textarea {:value (get-in @state [:caption-review-drafts (:caption/id caption)] "")
                    :aria-label (str (:caption/id caption) " review note")
                    :on-change #(swap! state assoc-in [:caption-review-drafts (:caption/id caption)]
