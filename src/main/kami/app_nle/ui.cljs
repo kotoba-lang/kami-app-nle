@@ -196,7 +196,16 @@
              (when (seq (:relink/matches plan)) (js/setTimeout #(seek-frame! (:frame @state)) 0)))))
         (.catch #(swap! state assoc :directory-searching? false :project-error (str "Directory search failed: " (.-message %)))))))
 (defn media-ready! [] (let [v (primary-video) c @canvas-node] (set! (.-width c) (or (.-videoWidth v) 1280)) (set! (.-height c) (or (.-videoHeight v) 720)) (set! (.-currentTime v) (/ (:pending-source-frame @state) (get-in @state [:project :project/fps]))) (swap! state assoc :decoded? true) (draw-frame!)))
-(defn toggle-play! [] (when (:decoded? @state) (if (:playing? @state) (.pause (primary-video)) (.play (primary-video))) (swap! state update :playing? not)))
+(declare ensure-export-audio! set-primary-audio! sync-master-eq!)
+(defn toggle-play! []
+  (when (:decoded? @state)
+    (ensure-export-audio!)
+    (sync-master-eq!)
+    (when-let [clip (nle/clip-at-frame (:project @state) (:frame @state))]
+      (when-let [segment (some #(when (= (:clip/id clip) (:segment/clip-id %)) %) (nle/render-segments (:project @state)))]
+        (set-primary-audio! segment)))
+    (if (:playing? @state) (.pause (primary-video)) (.play (primary-video)))
+    (swap! state update :playing? not)))
 (defn download-blob! [blob] (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")] (set! (.-href a) url) (set! (.-download a) "kami-nle-master.webm") (.click a) (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
 (defn download-project! []
   (let [blob (js/Blob. #js [(pr-str (:project @state))] #js {:type "application/edn"})
@@ -345,27 +354,55 @@
   (let [profile (nle/export-profile project) preferred (:profile/mime profile)
         fallback "video/webm;codecs=vp8,opus" mime (if (.isTypeSupported js/MediaRecorder preferred) preferred fallback)]
     #js {:mimeType mime :videoBitsPerSecond (:profile/video-bps profile) :audioBitsPerSecond (:profile/audio-bps profile)}))
+(defn configure-eq-nodes! [low mid high]
+  (set! (.-type low) "lowshelf") (set! (.. low -frequency -value) 120)
+  (set! (.-type mid) "peaking") (set! (.. mid -frequency -value) 1000) (set! (.. mid -Q -value) 0.8)
+  (set! (.-type high) "highshelf") (set! (.. high -frequency -value) 8000))
+(defn apply-eq! [{:keys [low mid high]} eq]
+  (let [{:keys [low-db mid-db high-db]} (nle/normalize-eq eq)]
+    (set! (.. low -gain -value) low-db) (set! (.. mid -gain -value) mid-db) (set! (.. high -gain -value) high-db)))
 (defn ensure-export-audio! []
   (or @export-audio
       (let [Ctor (or (.-AudioContext js/window) (.-webkitAudioContext js/window)) ctx (new Ctor)
             source-a (.createMediaElementSource ctx @video-a-node)
             source-b (.createMediaElementSource ctx @video-b-node)
+            low-a (.createBiquadFilter ctx) mid-a (.createBiquadFilter ctx) high-a (.createBiquadFilter ctx)
+            low-b (.createBiquadFilter ctx) mid-b (.createBiquadFilter ctx) high-b (.createBiquadFilter ctx)
+            master-low (.createBiquadFilter ctx) master-mid (.createBiquadFilter ctx) master-high (.createBiquadFilter ctx)
             gain-a (.createGain ctx) gain-b (.createGain ctx) master (.createGain ctx) analyser (.createAnalyser ctx)
             destination (.createMediaStreamDestination ctx)]
+        (configure-eq-nodes! low-a mid-a high-a) (configure-eq-nodes! low-b mid-b high-b)
+        (configure-eq-nodes! master-low master-mid master-high)
         (set! (.. gain-a -gain -value) 1) (set! (.. gain-b -gain -value) 0)
         (set! (.. master -gain -value) (:master-gain @state)) (set! (.-fftSize analyser) 512)
-        (.connect source-a gain-a) (.connect source-b gain-b)
-        (.connect gain-a master) (.connect gain-b master) (.connect master analyser)
+        (.connect source-a low-a) (.connect low-a mid-a) (.connect mid-a high-a) (.connect high-a gain-a)
+        (.connect source-b low-b) (.connect low-b mid-b) (.connect mid-b high-b) (.connect high-b gain-b)
+        (.connect gain-a master-low) (.connect gain-b master-low)
+        (.connect master-low master-mid) (.connect master-mid master-high) (.connect master-high master) (.connect master analyser)
         (.connect analyser destination) (.connect analyser (.-destination ctx))
-        (reset! export-audio {:context ctx :destination destination :node-a @video-a-node :node-b @video-b-node
-                              :gain-a gain-a :gain-b gain-b :master master :analyser analyser}))))
+        (let [runtime {:context ctx :destination destination :node-a @video-a-node :node-b @video-b-node
+                       :gain-a gain-a :gain-b gain-b :eq-a {:low low-a :mid mid-a :high high-a}
+                       :eq-b {:low low-b :mid mid-b :high high-b}
+                       :master-eq {:low master-low :mid master-mid :high master-high}
+                       :master master :analyser analyser}]
+          (apply-eq! (:master-eq runtime) (get-in @state [:project :project/master-eq]))
+          (reset! export-audio runtime)))))
 (defn gain-for-video [video]
   (let [{:keys [node-a gain-a gain-b]} @export-audio] (if (identical? video node-a) gain-a gain-b)))
+(defn eq-for-video [video]
+  (let [{:keys [node-a eq-a eq-b]} @export-audio] (if (identical? video node-a) eq-a eq-b)))
+(defn set-video-eq! [video eq] (when @export-audio (apply-eq! (eq-for-video video) eq)))
+(defn set-master-eq! [band db]
+  (swap! state update :project nle/set-master-eq band db)
+  (when @export-audio (apply-eq! (:master-eq @export-audio) (get-in @state [:project :project/master-eq]))))
+(defn sync-master-eq! []
+  (when @export-audio (apply-eq! (:master-eq @export-audio) (get-in @state [:project :project/master-eq]))))
 (defn set-master-gain! [gain]
   (swap! state assoc :master-gain gain)
   (when-let [master (:master @export-audio)] (set! (.. master -gain -value) gain)))
 (defn set-primary-audio! [segment]
   (when @export-audio
+    (set-video-eq! (primary-video) (:segment/audio-eq segment))
     (set! (.-value (.-gain (gain-for-video (primary-video)))) (or (:segment/audio-gain segment) 1))
     (set! (.-value (.-gain (gain-for-video (secondary-video)))) 0)))
 (defn prepare-video! [video segment]
@@ -405,6 +442,7 @@
                                    secondary-param (.-gain (gain-for-video (secondary-video)))
                                    primary-gain (or (:segment/audio-gain segment) 1)
                                    secondary-gain (or (:segment/audio-gain next-segment) 1)]
+                               (set-video-eq! (secondary-video) (:segment/audio-eq next-segment))
                                (.setValueAtTime primary-param primary-gain now) (.linearRampToValueAtTime primary-param 0 (+ now dissolve-sec))
                                (.setValueAtTime secondary-param 0 now) (.linearRampToValueAtTime secondary-param secondary-gain (+ now dissolve-sec)))
                              (.play (secondary-video))
@@ -437,7 +475,7 @@
             audio-track (first (array-seq (.getAudioTracks (.-stream destination))))
             _ (.addTrack stream audio-track)
             recorder (js/MediaRecorder. stream (recorder-options (:project @state))) chunks (array)]
-        (.resume context) (set-master-gain! (:master-gain @state)) (set-primary-audio! (first segments)) (swap! state assoc :exporting? true :playing? true)
+        (.resume context) (sync-master-eq!) (set-master-gain! (:master-gain @state)) (set-primary-audio! (first segments)) (swap! state assoc :exporting? true :playing? true)
         (set! (.-ondataavailable recorder) #(when (pos? (.. % -data -size)) (.push chunks (.-data %))))
         (set! (.-onstop recorder) #(do (download-blob! (js/Blob. chunks #js {:type "video/webm"})) (swap! state dissoc :export-segment) (swap! state assoc :exporting? false :playing? false)))
         (.start recorder 250)
@@ -528,6 +566,14 @@
        [:label "Source out" [:input {:type "number" :min 1 :value (:clip/out-frame clip) :on-change #(edit-trim! clip :out (js/parseInt (.. % -target -value)))}]]
        [:label "Clip audio" [:input {:type "range" :min 0 :max 2 :step 0.05 :value (or (:clip/audio-gain clip) 1)
                                       :aria-label "Clip audio gain" :on-change #(swap! state update :project nle/set-clip-audio-gain (:clip/id clip) (js/parseFloat (.. % -target -value)))}]]
+       (for [[band label] [[:low-db "Clip low EQ"] [:mid-db "Clip mid EQ"] [:high-db "Clip high EQ"]]]
+         ^{:key band} [:label label [:input {:type "range" :min -12 :max 12 :step 0.5
+                                              :value (get (nle/normalize-eq (:clip/audio-eq clip)) band)
+                                              :aria-label label
+                                              :on-change #(let [db (js/parseFloat (.. % -target -value))]
+                                                            (swap! state update :project nle/set-clip-eq (:clip/id clip) band db)
+                                                            (when (= (:clip/id clip) (:clip/id (nle/clip-at-frame (:project @state) (:frame @state))))
+                                                              (set-video-eq! (primary-video) (:clip/audio-eq (selected-clip (:project @state) (:clip/id clip))))))}]])
        [:label "Transition" [:select {:value (name (or (get-in clip [:clip/transition-out :transition/type]) :cut)) :on-change #(swap! state update :project nle/set-transition (:clip/id clip) (keyword (.. % -target -value)) 12)} [:option {:value "cut"} "Cut"] [:option {:value "fade"} "Fade to black"] [:option {:value "dissolve"} "Cross dissolve"]]]
        [:div.tools [:button {:on-click #(swap! state update :project nle/ripple-trim-out (:clip/id clip) (+ 5 (:clip/out-frame clip)))} "Ripple +5"]
         [:button {:on-click #(swap! state update :project nle/slip-clip (:clip/id clip) -5)} "Slip −5"]
@@ -536,6 +582,11 @@
           [:button {:on-click #(swap! state update :project nle/roll-cut (:clip/id clip) (:clip/id right) 5)} "Roll +5"])]] )
     [:label "Master audio" [:input {:type "range" :min 0 :max 1.5 :step 0.05 :value (:master-gain @state) :aria-label "Master audio gain"
                                      :on-change #(set-master-gain! (js/parseFloat (.. % -target -value)))}]]
+    (for [[band label] [[:low-db "Master low EQ"] [:mid-db "Master mid EQ"] [:high-db "Master high EQ"]]]
+      ^{:key band} [:label label [:input {:type "range" :min -12 :max 12 :step 0.5
+                                           :value (get (nle/normalize-eq (:project/master-eq project)) band)
+                                           :aria-label label
+                                           :on-change #(set-master-eq! band (js/parseFloat (.. % -target -value)))}]])
     [:label "Export preset" [:select {:value (name (:project/export-profile project)) :aria-label "Export preset"
                                        :on-change #(swap! state assoc-in [:project :project/export-profile] (keyword (.. % -target -value)))}
                               (for [[id profile] nle/export-profiles] ^{:key id} [:option {:value (name id)} (:profile/name profile)])]]

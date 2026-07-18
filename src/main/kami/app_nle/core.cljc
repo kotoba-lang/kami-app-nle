@@ -26,7 +26,14 @@
                     :profile/video-bps 800000 :profile/audio-bps 96000})
 (defn media-url-key [proxy-preview? exporting? asset]
   (if (and proxy-preview? (not exporting?) (:proxy-url asset)) :proxy-url :url))
-(defn project [m] (merge {:project/schema schema :project/fps 30 :project/export-profile :review :project/assets {} :project/tracks []} m))
+(def flat-eq {:low-db 0.0 :mid-db 0.0 :high-db 0.0})
+(defn clamp-db [db] (max -12.0 (min 12.0 (or db 0.0))))
+(defn normalize-eq [eq]
+  {:low-db (clamp-db (:low-db eq)) :mid-db (clamp-db (:mid-db eq)) :high-db (clamp-db (:high-db eq))})
+(defn valid-eq? [eq]
+  (and (map? eq) (every? #(and (number? %) (<= -12 % 12)) ((juxt :low-db :mid-db :high-db) eq))))
+(defn project [m] (merge {:project/schema schema :project/fps 30 :project/export-profile :review
+                           :project/master-eq flat-eq :project/assets {} :project/tracks []} m))
 (defn register-asset
   ([p asset-id name] (register-asset p asset-id name nil))
   ([p asset-id name sha256]
@@ -98,6 +105,10 @@
                                                      :transition/duration-frames (max 0 duration-frames)})))
 (defn set-clip-audio-gain [p id gain]
   (update-clip p id #(assoc % :clip/audio-gain (max 0 (min 2 gain)))))
+(defn set-clip-eq [p id band db]
+  (update-clip p id #(assoc % :clip/audio-eq (assoc (normalize-eq (:clip/audio-eq %)) band (clamp-db db)))))
+(defn set-master-eq [p band db]
+  (assoc p :project/master-eq (assoc (normalize-eq (:project/master-eq p)) band (clamp-db db))))
 (defn ripple-trim-out [p id new-out]
   (let [target (some #(when (= id (:clip/id %)) %) (mapcat :track/clips (:project/tracks p)))
         delta (- new-out (:clip/out-frame target))]
@@ -141,7 +152,9 @@
                                 clips)))))
                   tracks))))
 (defn validate-project [p] (vec (concat (when-not (= schema (:project/schema p)) [:unsupported-schema]) (when-not (pos-int? (:project/fps p)) [:invalid-fps])
-  (for [c (mapcat :track/clips (:project/tracks p)) :when (or (neg? (:clip/start-frame c)) (>= (:clip/in-frame c) (:clip/out-frame c)))] [:invalid-clip (:clip/id c)]))))
+  (when (and (:project/master-eq p) (not (valid-eq? (:project/master-eq p)))) [:invalid-master-eq])
+  (for [c (mapcat :track/clips (:project/tracks p)) :when (or (neg? (:clip/start-frame c)) (>= (:clip/in-frame c) (:clip/out-frame c)))] [:invalid-clip (:clip/id c)])
+  (for [c (mapcat :track/clips (:project/tracks p)) :when (and (:clip/audio-eq c) (not (valid-eq? (:clip/audio-eq c))))] [:invalid-clip-eq (:clip/id c)]))))
 (defn accept-project [value]
   (when (and (map? value) (empty? (validate-project value))) value))
 (def recovery-version 2)
@@ -205,6 +218,7 @@
              :segment/source-start-sec (/ (:clip/in-frame clip) fps)
              :segment/duration-sec (/ (- (:clip/out-frame clip) (:clip/in-frame clip)) fps)
              :segment/audio-gain (or (:clip/audio-gain clip) 1.0)
+             :segment/audio-eq (normalize-eq (:clip/audio-eq clip))
              :segment/transition-out (:clip/transition-out clip)})
           (video-clips p))))
 

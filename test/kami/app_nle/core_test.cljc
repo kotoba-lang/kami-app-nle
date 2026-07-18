@@ -7,7 +7,8 @@
         bound (assoc-in bound [:project/tracks 0 :track/clips 0 :clip/source-id] "asset:a")]
     (is (= "c" (:clip/id (nle/clip-at-frame bound 50))))
     (is (= [{:segment/clip-id "c" :segment/source-id "asset:a" :segment/timeline-start-sec 0
-             :segment/source-start-sec 1/3 :segment/duration-sec 10/3 :segment/audio-gain 1.0 :segment/transition-out nil}]
+             :segment/source-start-sec 1/3 :segment/duration-sec 10/3 :segment/audio-gain 1.0
+             :segment/audio-eq nle/flat-eq :segment/transition-out nil}]
            (nle/render-segments bound)))))
 (deftest trim-transition-and-relations
   (let [base (nle/project {:project/fps 30 :project/tracks [{:track/id "v" :track/type :video
@@ -47,6 +48,18 @@
         mixed (nle/set-clip-audio-gain bound "c" 0.35)]
     (is (= 0.35 (:segment/audio-gain (first (nle/render-segments mixed)))))
     (is (= 2 (:clip/audio-gain (first (nle/video-clips (nle/set-clip-audio-gain bound "c" 9))))))))
+(deftest project-authoritative-three-band-eq
+  (let [bound (-> p (assoc-in [:project/tracks 0 :track/type] :video)
+                  (assoc-in [:project/tracks 0 :track/clips 0 :clip/source-id] "asset:a"))
+        equalized (-> bound (nle/set-clip-eq "c" :low-db 6.5)
+                      (nle/set-clip-eq "c" :mid-db -20)
+                      (nle/set-master-eq :high-db 4.0))]
+    (is (= {:low-db 6.5 :mid-db -12.0 :high-db 0.0}
+           (:segment/audio-eq (first (nle/render-segments equalized)))))
+    (is (= {:low-db 0.0 :mid-db 0.0 :high-db 4.0} (:project/master-eq equalized)))
+    (is (empty? (nle/validate-project equalized)))
+    (is (= [[:invalid-clip-eq "c"]]
+           (nle/validate-project (assoc-in equalized [:project/tracks 0 :track/clips 0 :clip/audio-eq :low-db] 30))))))
 (deftest production-export-profile
   (is (= ["video/webm;codecs=vp8,opus" 2000000]
          ((juxt :profile/mime :profile/video-bps) (nle/export-profile p))))
