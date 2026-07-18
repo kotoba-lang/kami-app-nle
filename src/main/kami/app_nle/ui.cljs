@@ -142,7 +142,7 @@
           (set! (.-globalAlpha ctx) progress) (.drawImage ctx overlay 0 0 (.-width c) (.-height c)))
         (set! (.-filter ctx) "none") (set! (.-globalAlpha ctx) 1)
         (doseq [[index caption] (map-indexed vector (nle/captions-at-frame (:project @state) caption-frame))]
-          (let [style (nle/normalize-caption-style (:caption/style caption))
+          (let [style (nle/caption-style-at-frame caption caption-frame)
                 font-size (max 18 (js/Math.round (* (.-height c) 0.055 (:caption/font-scale style))))
                 line-height (* font-size 1.25)
                 custom-region? (nle/caption-custom-region? style)
@@ -174,6 +174,7 @@
                                        (.-height c) index)]
             (when custom-region?
               (.save ctx) (.beginPath ctx) (.rect ctx region-x region-y region-width region-height) (.clip ctx))
+            (set! (.-globalAlpha ctx) (or (:caption/opacity style) 1.0))
             (set! (.-font ctx) (str "600 " font-size "px sans-serif"))
             (set! (.-direction ctx) (if (= :rltb (:caption/writing-mode style)) "rtl" "ltr"))
             (set! (.-textAlign ctx) (name align))
@@ -193,7 +194,8 @@
                     (let [line-y (+ base-y (* line-index line-height))]
                       (.fillText ctx line x line-y)
                       (draw-caption-ruby! ctx line style x line-y font-size))))))
-            (when custom-region? (.restore ctx))))
+            (when custom-region? (.restore ctx))
+            (set! (.-globalAlpha ctx) 1)))
         (set! (.-globalAlpha ctx) 1)
         (swap! state assoc :frame caption-frame
                :audio-meter-db (audio-meter-db)))
@@ -436,6 +438,37 @@
 (defn imsc-font-scale [font-size]
   (if (and font-size (str/ends-with? font-size "%"))
     (/ (js/parseFloat font-size) 100) 1.0))
+(defn imsc-animation-value [property value]
+  (when (seq value)
+    (let [number (if (= property :font-scale) (imsc-font-scale value) (js/parseFloat value))]
+      (when (js/Number.isFinite number) number))))
+(defn imsc-animations [node fps cue-start cue-end]
+  (->> (array-seq (.getElementsByTagNameNS node ttml-namespace "animate"))
+       (keep (fn [animation]
+               (let [attribute (str/replace (.getAttribute animation "attributeName") "tts:" "")
+                     property ({"opacity" :opacity "fontSize" :font-scale} attribute)
+                     from (imsc-animation-value property (.getAttribute animation "from"))
+                     to (imsc-animation-value property (.getAttribute animation "to"))
+                     begin (nle/imsc-time->frame (or (not-empty (.getAttribute animation "begin")) "0s") fps)
+                     duration (nle/imsc-time->frame (.getAttribute animation "dur") fps)
+                     explicit-end (nle/imsc-time->frame (.getAttribute animation "end") fps)
+                     start (when (number? begin) (+ cue-start begin))
+                     end (cond (and start (number? duration)) (+ start duration)
+                               (number? explicit-end) (+ cue-start explicit-end))]
+                 (when (and property (number? from) (number? to) start end (< start end)
+                            (< start cue-end) (> end cue-start))
+                   {:animation/property property :animation/from from :animation/to to
+                    :animation/start-frame (max cue-start start) :animation/end-frame (min cue-end end)}))))
+       (take 16) vec))
+(defn clip-caption-animations [animations start end]
+  (vec (keep (fn [{animation-start :animation/start-frame animation-end :animation/end-frame
+                   from :animation/from to :animation/to :as animation}]
+               (let [clipped-start (max start animation-start) clipped-end (min end animation-end)
+                     value-at (fn [frame] (+ from (* (/ (- frame animation-start) (- animation-end animation-start)) (- to from))))]
+                 (when (< clipped-start clipped-end)
+                   (assoc animation :animation/start-frame clipped-start :animation/end-frame clipped-end
+                          :animation/from (value-at clipped-start) :animation/to (value-at clipped-end)))))
+             animations)))
 (defn imsc-set-segments [document node fps start end]
   (let [sets (map-indexed
               (fn [index set-node]
@@ -470,6 +503,7 @@
         writing (imsc-style-value document node "writingMode")
         padding (imsc-padding (imsc-style-value document node "padding"))
         display (imsc-style-value document node "displayAlign")
+        opacity (js/parseFloat (imsc-style-value document node "opacity"))
         base (cond-> {:caption/position (imsc-caption-position document node)
                       :caption/align (keyword (let [align (imsc-style-value document node "textAlign")]
                                                 (if (#{"left" "center" "right"} align) align "center")))
@@ -478,6 +512,7 @@
                extent (assoc :caption/width-percent (first extent) :caption/height-percent (second extent))
                (#{"lrtb" "rltb" "tbrl" "tblr"} writing) (assoc :caption/writing-mode (keyword writing))
                padding (assoc :caption/padding-percent padding)
+               (js/Number.isFinite opacity) (assoc :caption/opacity opacity)
                (#{"before" "center" "after"} display) (assoc :caption/display-align (keyword display)))
         overrides (reduce
                    (fn [style {:keys [set/node]}]
@@ -487,7 +522,8 @@
                            extent (imsc-percent-pair (imsc-specified-style-value document node "extent" #{}))
                            writing (imsc-specified-style-value document node "writingMode" #{})
                            padding (imsc-padding (imsc-specified-style-value document node "padding" #{}))
-                           display (imsc-specified-style-value document node "displayAlign" #{})]
+                           display (imsc-specified-style-value document node "displayAlign" #{})
+                           opacity (js/parseFloat (imsc-specified-style-value document node "opacity" #{}))]
                        (cond-> style
                          (#{"left" "center" "right"} align) (assoc :caption/align (keyword align))
                          (seq font-size) (assoc :caption/font-scale (imsc-font-scale font-size))
@@ -496,6 +532,7 @@
                          extent (assoc :caption/width-percent (first extent) :caption/height-percent (second extent))
                          (#{"lrtb" "rltb" "tbrl" "tblr"} writing) (assoc :caption/writing-mode (keyword writing))
                          padding (assoc :caption/padding-percent padding)
+                         (js/Number.isFinite opacity) (assoc :caption/opacity opacity)
                          (#{"before" "center" "after"} display) (assoc :caption/display-align (keyword display)))))
                    base active-sets)
         visible? (not= "hidden" (some (fn [{:keys [set/node]}]
@@ -543,18 +580,23 @@
                                          end (nle/imsc-time->frame (.getAttribute node "end") fps)
                                          text (str/trim (imsc-node-text document node))
                                          ruby-runs (imsc-ruby-runs document node)
-                                         with-ruby #(cond-> % (seq ruby-runs) (assoc :caption/ruby-runs ruby-runs))]
+                                         animations (imsc-animations node fps start end)
+                                         with-rich (fn [style segment-start segment-end]
+                                                     (cond-> style
+                                                       (seq ruby-runs) (assoc :caption/ruby-runs ruby-runs)
+                                                       (seq animations) (assoc :caption/animations
+                                                                               (clip-caption-animations animations segment-start segment-end))))]
                                      (if (and (number? start) (number? end) (< start end))
                                        (if-let [segments (imsc-set-segments document node fps start end)]
                                          (keep (fn [{:keys [segment/start segment/end segment/sets]}]
                                                  (when-let [style (imsc-segment-style document node sets)]
                                                    {:caption/start-frame start :caption/end-frame end
-                                                    :caption/text text :caption/style (with-ruby style)}))
+                                                    :caption/text text :caption/style (with-rich style start end)}))
                                                segments)
                                          [{:caption/start-frame nil :caption/end-frame nil
                                            :caption/text text :caption/style nil}])
                                        [{:caption/start-frame start :caption/end-frame end
-                                         :caption/text text :caption/style (with-ruby (imsc-segment-style document node []))}])))
+                                         :caption/text text :caption/style (with-rich (imsc-segment-style document node []) start end)}])))
                                  nodes))]
           {:language language :cues cues})))))
 (defn import-imsc1! [event]
@@ -1131,6 +1173,10 @@
                                    {:caption/text (.. % -target -value)})}]
        [:small {:aria-label (str (:caption/id caption) " line break preview")}
         (str/join " ⏎ " (nle/caption-line-breaks (:caption/text caption) (nle/caption-language caption) 24))]
+       (when-let [animations (seq (:caption/animations (nle/normalize-caption-style (:caption/style caption))))]
+         [:small {:aria-label (str (:caption/id caption) " animation summary")}
+          (str/join ", " (map (fn [{:animation/keys [property start-frame end-frame]}]
+                                  (str (name property) " " start-frame "→" end-frame)) animations))])
        [:input {:value (nle/caption-language caption) :aria-label (str (:caption/id caption) " language")
                 :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
                                    {:caption/language (.. % -target -value)})}]
