@@ -470,14 +470,7 @@
                      key-spline (assoc :animation/key-spline key-spline))))))
        (take 16) vec))
 (defn clip-caption-animations [animations start end]
-  (vec (keep (fn [{animation-start :animation/start-frame animation-end :animation/end-frame
-                   from :animation/from to :animation/to :as animation}]
-               (let [clipped-start (max start animation-start) clipped-end (min end animation-end)
-                     value-at (fn [frame] (nle/animation-value-at animation frame))]
-                 (when (< clipped-start clipped-end)
-                   (assoc animation :animation/start-frame clipped-start :animation/end-frame clipped-end
-                          :animation/from (value-at clipped-start) :animation/to (value-at clipped-end)))))
-             animations)))
+  (vec (keep #(nle/clip-animation % start end) animations)))
 (defn imsc-set-segments [document node fps start end]
   (let [sets (map-indexed
               (fn [index set-node]

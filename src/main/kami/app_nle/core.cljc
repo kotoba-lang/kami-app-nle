@@ -157,6 +157,14 @@
                     (>= frame end-frame) 1.0
                     :else (/ (- frame start-frame) (- end-frame start-frame)))]
     (double (+ from (* (animation-progress animation ratio) (- to from))))))
+(defn clip-animation [animation start end]
+  (let [animation-start (:animation/start-frame animation)
+        animation-end (:animation/end-frame animation)
+        clipped-start (max start animation-start) clipped-end (min end animation-end)]
+    (when (< clipped-start clipped-end)
+      (assoc animation :animation/start-frame clipped-start :animation/end-frame clipped-end
+             :animation/from (animation-value-at animation clipped-start)
+             :animation/to (animation-value-at animation clipped-end)))))
 (defn caption-style-at-frame [caption frame]
   (let [style (normalize-caption-style (:caption/style caption))]
     (reduce (fn [current {:animation/keys [property] :as animation}]
