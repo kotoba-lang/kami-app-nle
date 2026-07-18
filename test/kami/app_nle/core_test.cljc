@@ -66,11 +66,24 @@
   (let [registered (nle/register-asset p "asset:7" "scene.webm" "def456")]
     (is (= "asset:7" (nle/asset-id-by-name registered "scene.webm")))
     (is (= "asset:7" (nle/asset-id-by-signature registered {:name "renamed.webm" :sha256 "def456"})))
+    (is (nil? (nle/asset-id-by-signature registered {:name "scene.webm" :sha256 "different"})))
     (is (= {:asset/name "scene.webm" :asset/sha256 "def456"} (get-in registered [:project/assets "asset:7"])))
     (is (= ["asset:7"] (nle/missing-asset-ids registered [])))
     (is (empty? (nle/missing-asset-ids registered ["asset:7"])))
     (is (= registered (nle/recover-project (nle/recovery-envelope registered))))
     (is (= "asset:0" (nle/next-asset-id registered)))))
+(deftest deterministic-directory-relink-search
+  (let [project (-> p (nle/register-asset "asset:7" "original.webm" "aaa")
+                    (nle/register-asset "asset:8" "legacy.mov"))
+        candidates [{:file/index 0 :file/path "root/z/renamed.webm" :file/name "renamed.webm" :file/sha256 "aaa"}
+                    {:file/index 1 :file/path "root/a/renamed.webm" :file/name "renamed.webm" :file/sha256 "aaa"}
+                    {:file/index 2 :file/path "root/legacy.mov" :file/name "legacy.mov" :file/sha256 "new"}
+                    {:file/index 3 :file/path "root/original.webm" :file/name "original.webm" :file/sha256 "wrong"}]
+        plan (nle/directory-relink-plan project candidates)]
+    (is (= [["asset:7" 1] ["asset:8" 2]]
+           (mapv (fn [match] [(:asset/id match) (get-in match [:candidate :file/index])]) (:relink/matches plan))))
+    (is (empty? (:relink/missing plan)))
+    (is (= ["root/original.webm" "root/z/renamed.webm"] (:relink/ignored-paths plan)))))
 (deftest content-addressed-media-cache-policy
   (let [registered (-> p (nle/register-asset "asset:7" "scene.webm" "def456")
                        (nle/register-asset "asset:8" "legacy.mov"))]

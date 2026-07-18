@@ -7,7 +7,7 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :cache-restoring? false :cache-restored-count 0 :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :project-error nil :recovered? false :primary-slot :a :master-gain 0.9 :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
@@ -108,6 +108,32 @@
                                           (cache-media! sha256 (.-name file) (.-type file) file))))))))
                 (js/Promise.resolve true) files)
         (.then #(when (seq files) (seek-frame! (:frame @state)))))))
+(defn scan-video-directory! [event]
+  (let [files (->> (array-seq (.. event -target -files))
+                   (filter #(.startsWith (or (.-type %) "") "video/")) vec)]
+    (swap! state assoc :directory-searching? true :directory-result nil :project-error nil)
+    (-> (.all js/Promise
+              (clj->js
+               (map-indexed (fn [index file]
+                              (-> (sha256-file! file)
+                                  (.then (fn [sha256]
+                                           {:file/index index :file/path (or (.-webkitRelativePath file) (.-name file))
+                                            :file/name (.-name file) :file/sha256 sha256 :file/ref file})))) files)))
+        (.then
+         (fn [values]
+           (let [plan (nle/directory-relink-plan (:project @state) (array-seq values))]
+             (doseq [{:asset/keys [id] :keys [candidate]} (:relink/matches plan)]
+               (let [file (:file/ref candidate) url (js/URL.createObjectURL file)]
+                 (when-let [old-url (get-in @state [:assets id :url])] (js/URL.revokeObjectURL old-url))
+                 (swap! state assoc-in [:assets id]
+                        {:name (.-name file) :relative-path (:file/path candidate) :type (.-type file)
+                         :sha256 (:file/sha256 candidate) :blob file :url url})
+                 (cache-media! (:file/sha256 candidate) (.-name file) (.-type file) file)))
+             (swap! state assoc :directory-searching? false
+                    :directory-result {:matched (count (:relink/matches plan)) :missing (:relink/missing plan)
+                                       :ignored (count (:relink/ignored-paths plan))})
+             (when (seq (:relink/matches plan)) (js/setTimeout #(seek-frame! (:frame @state)) 0)))))
+        (.catch #(swap! state assoc :directory-searching? false :project-error (str "Directory search failed: " (.-message %)))))))
 (defn media-ready! [] (let [v (primary-video) c @canvas-node] (set! (.-width c) (or (.-videoWidth v) 1280)) (set! (.-height c) (or (.-videoHeight v) 720)) (set! (.-currentTime v) (/ (:pending-source-frame @state) (get-in @state [:project :project/fps]))) (swap! state assoc :decoded? true) (draw-frame!)))
 (defn toggle-play! [] (when (:decoded? @state) (if (:playing? @state) (.pause (primary-video)) (.play (primary-video))) (swap! state update :playing? not)))
 (defn download-blob! [blob] (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")] (set! (.-href a) url) (set! (.-download a) "kami-nle-master.webm") (.click a) (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
@@ -420,7 +446,10 @@
                     total (max 300 (nle/duration-frames project)) fps (:project/fps project)
                     missing (nle/missing-asset-ids project (keys assets))]
  [:main [:header [:div [:small "KOTOBA-LANG / VIDEO"] [:h1 "KAMI NLE"]] [:div.transport [:button.primary {:on-click toggle-play! :disabled (not decoded?)} (if playing? "❚❚ Pause" "▶ Play decoded media")] [:output (nle/timecode frame fps)]]]
-  [:section.workspace [:aside [:h2 "Project bin"] [:label.import "Import / relink V1 videos" [:input {:type "file" :accept "video/*" :multiple true :aria-label "Import or relink NLE videos" :on-change load-media!}]] (if (seq assets) (for [[id asset] assets] ^{:key id} [:div.asset (str "🎞 " id " • " (:name asset))]) [:div.asset "No media loaded"]) [:label "Effect" [:select {:value (name effect) :on-change #(swap! state assoc :effect (keyword (.. % -target -value)))} [:option {:value "none"} "None"] [:option {:value "cinema"} "Cinema"] [:option {:value "mono"} "Monochrome"] [:option {:value "dream"} "Dream"]]]
+  [:section.workspace [:aside [:h2 "Project bin"] [:label.import "Import / relink V1 videos" [:input {:type "file" :accept "video/*" :multiple true :aria-label "Import or relink NLE videos" :on-change load-media!}]]
+    [:label.import "Search video directory" [:input {:type "file" :accept "video/*" :multiple true :webkitdirectory ""
+                                                       :aria-label "Search NLE video directory" :on-change scan-video-directory!}]]
+    (if (seq assets) (for [[id asset] assets] ^{:key id} [:div.asset (str "🎞 " id " • " (:name asset))]) [:div.asset "No media loaded"]) [:label "Effect" [:select {:value (name effect) :on-change #(swap! state assoc :effect (keyword (.. % -target -value)))} [:option {:value "none"} "None"] [:option {:value "cinema"} "Cinema"] [:option {:value "mono"} "Monochrome"] [:option {:value "dream"} "Dream"]]]
     (when-let [clip (selected-clip project selected)]
       [:div.asset [:strong (str "Edit • " (:clip/name clip))]
        [:label "Source in" [:input {:type "number" :min 0 :value (:clip/in-frame clip) :on-change #(edit-trim! clip :in (js/parseInt (.. % -target -value)))}]]
@@ -449,6 +478,9 @@
     [:button {:on-click redo! :disabled (empty? (get-in @state [:history :history/future])) :aria-label "Redo project edit"} "↷ Redo"]
     [:button {:on-click #(js/navigator.clipboard.writeText (pr-str project))} "Copy project EDN"]]
    (when-let [error (:project-error @state)] [:aside [:strong (str "Project error: " error)]])
+   (when (:directory-searching? @state) [:aside [:strong "Searching video directory…"]])
+   (when-let [{:keys [matched missing ignored]} (:directory-result @state)]
+     [:aside [:strong (str "Directory relink: " matched " matched • " (count missing) " missing • " ignored " ignored")]])
    (when (:recovered? @state) [:aside [:strong "Recovered autosaved project"]])
    (when (:cache-restoring? @state) [:aside [:strong "Restoring verified media cache…"]])
    (when (pos? (:cache-restored-count @state))
