@@ -4,7 +4,15 @@
   {:review {:profile/name "Review VP8" :profile/mime "video/webm;codecs=vp8,opus" :profile/video-bps 2000000 :profile/audio-bps 128000}
    :master {:profile/name "Master VP9" :profile/mime "video/webm;codecs=vp9,opus" :profile/video-bps 8000000 :profile/audio-bps 192000}
    :compact {:profile/name "Compact VP8" :profile/mime "video/webm;codecs=vp8,opus" :profile/video-bps 1000000 :profile/audio-bps 96000}})
-(defn project [m] (merge {:project/schema schema :project/fps 30 :project/export-profile :review :project/tracks []} m))
+(defn project [m] (merge {:project/schema schema :project/fps 30 :project/export-profile :review :project/assets {} :project/tracks []} m))
+(defn register-asset [p asset-id name]
+  (assoc-in p [:project/assets asset-id] {:asset/name name}))
+(defn asset-id-by-name [p name]
+  (some (fn [[asset-id asset]] (when (= name (:asset/name asset)) asset-id)) (:project/assets p)))
+(defn next-asset-id [p]
+  (loop [index 0]
+    (let [asset-id (str "asset:" index)]
+      (if (contains? (:project/assets p) asset-id) (recur (inc index)) asset-id))))
 (defn export-profile [p] (get export-profiles (:project/export-profile p) (:review export-profiles)))
 (defn clip-end [c] (+ (:clip/start-frame c) (- (:clip/out-frame c) (:clip/in-frame c))))
 (defn duration-frames [p] (reduce max 0 (map clip-end (mapcat :track/clips (:project/tracks p)))))

@@ -51,3 +51,9 @@
   (is (= p (nle/recover-project (nle/recovery-envelope p))))
   (is (nil? (nle/recover-project {:recovery/version 999 :recovery/project p})))
   (is (nil? (nle/recover-project {:recovery/version 1 :recovery/project (assoc p :project/schema "foreign/v1")}))))
+(deftest persisted-asset-relink-manifest
+  (let [registered (nle/register-asset p "asset:7" "scene.webm")]
+    (is (= "asset:7" (nle/asset-id-by-name registered "scene.webm")))
+    (is (= {:asset/name "scene.webm"} (get-in registered [:project/assets "asset:7"])))
+    (is (= registered (nle/recover-project (nle/recovery-envelope registered))))
+    (is (= "asset:0" (nle/next-asset-id registered)))))

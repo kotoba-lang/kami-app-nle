@@ -42,7 +42,15 @@
       (js/requestAnimationFrame draw-frame!))))
 (defn activate-source! [source-id source-frame] (when-let [{:keys [url]} (get-in @state [:assets source-id])] (let [video (primary-video)] (swap! state assoc :pending-source-frame source-frame :active-source source-id) (if (not= url (.-src video)) (do (set! (.-src video) url) (.load video)) (set! (.-currentTime video) (/ source-frame (get-in @state [:project :project/fps])))))))
 (defn seek-frame! [frame] (when-let [clip (nle/clip-at-frame (:project @state) frame)] (activate-source! (:clip/source-id clip) (+ (:clip/in-frame clip) (- frame (:clip/start-frame clip))))))
-(defn load-media! [e] (let [files (array-seq (.. e -target -files))] (doseq [[index file] (map-indexed vector files)] (let [source-id (str "asset:" index) url (js/URL.createObjectURL file)] (swap! state assoc-in [:assets source-id] {:name (.-name file) :url url}))) (when (seq files) (seek-frame! (:frame @state)))))
+(defn load-media! [e]
+  (let [files (array-seq (.. e -target -files))]
+    (doseq [file files]
+      (let [source-id (or (nle/asset-id-by-name (:project @state) (.-name file)) (nle/next-asset-id (:project @state)))
+            url (js/URL.createObjectURL file)]
+        (when-let [old-url (get-in @state [:assets source-id :url])] (js/URL.revokeObjectURL old-url))
+        (swap! state (fn [s] (-> s (assoc-in [:assets source-id] {:name (.-name file) :url url})
+                                  (update :project nle/register-asset source-id (.-name file)))))))
+    (when (seq files) (seek-frame! (:frame @state)))))
 (defn media-ready! [] (let [v (primary-video) c @canvas-node] (set! (.-width c) (or (.-videoWidth v) 1280)) (set! (.-height c) (or (.-videoHeight v) 720)) (set! (.-currentTime v) (/ (:pending-source-frame @state) (get-in @state [:project :project/fps]))) (swap! state assoc :decoded? true) (draw-frame!)))
 (defn toggle-play! [] (when (:decoded? @state) (if (:playing? @state) (.pause (primary-video)) (.play (primary-video))) (swap! state update :playing? not)))
 (defn download-blob! [blob] (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")] (set! (.-href a) url) (set! (.-download a) "kami-nle-master.webm") (.click a) (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
@@ -58,8 +66,9 @@
                  (try
                    (if-let [project (nle/accept-project (reader/read-string text))]
                      (let [first-clip (first (nle/video-clips project))]
+                       (doseq [[_ asset] (:assets @state)] (when-let [url (:url asset)] (js/URL.revokeObjectURL url)))
                        (swap! state assoc :project project :selected (:clip/id first-clip)
-                              :frame (or (:clip/start-frame first-clip) 0) :decoded? false :playing? false :project-error nil))
+                              :frame (or (:clip/start-frame first-clip) 0) :decoded? false :playing? false :project-error nil :assets {}))
                      (swap! state assoc :project-error "Unsupported or invalid NLE project"))
                    (catch :default error (swap! state assoc :project-error (.-message error)))))))))
 (defn restore-recovery! []
@@ -189,7 +198,7 @@
     (swap! state update :project nle/trim-clip (:clip/id clip) in-frame out-frame)))
 (defn app [] (let [{:keys [project frame playing? selected decoded? assets effect exporting?]} @state total (max 300 (nle/duration-frames project)) fps (:project/fps project)]
  [:main [:header [:div [:small "KOTOBA-LANG / VIDEO"] [:h1 "KAMI NLE"]] [:div.transport [:button.primary {:on-click toggle-play! :disabled (not decoded?)} (if playing? "❚❚ Pause" "▶ Play decoded media")] [:output (nle/timecode frame fps)]]]
-  [:section.workspace [:aside [:h2 "Project bin"] [:label.import "Import V1 videos" [:input {:type "file" :accept "video/*" :multiple true :on-change load-media!}]] (if (seq assets) (for [[id asset] assets] ^{:key id} [:div.asset (str "🎞 " id " • " (:name asset))]) [:div.asset "No media loaded"]) [:label "Effect" [:select {:value (name effect) :on-change #(swap! state assoc :effect (keyword (.. % -target -value)))} [:option {:value "none"} "None"] [:option {:value "cinema"} "Cinema"] [:option {:value "mono"} "Monochrome"] [:option {:value "dream"} "Dream"]]]
+  [:section.workspace [:aside [:h2 "Project bin"] [:label.import "Import / relink V1 videos" [:input {:type "file" :accept "video/*" :multiple true :aria-label "Import or relink NLE videos" :on-change load-media!}]] (if (seq assets) (for [[id asset] assets] ^{:key id} [:div.asset (str "🎞 " id " • " (:name asset))]) [:div.asset "No media loaded"]) [:label "Effect" [:select {:value (name effect) :on-change #(swap! state assoc :effect (keyword (.. % -target -value)))} [:option {:value "none"} "None"] [:option {:value "cinema"} "Cinema"] [:option {:value "mono"} "Monochrome"] [:option {:value "dream"} "Dream"]]]
     (when-let [clip (selected-clip project selected)]
       [:div.asset [:strong (str "Edit • " (:clip/name clip))]
        [:label "Source in" [:input {:type "number" :min 0 :value (:clip/in-frame clip) :on-change #(edit-trim! clip :in (js/parseInt (.. % -target -value)))}]]
