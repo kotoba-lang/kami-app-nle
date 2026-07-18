@@ -52,6 +52,14 @@
          ((juxt :profile/mime :profile/video-bps) (nle/export-profile p))))
   (is (= "video/webm;codecs=vp9,opus"
          (:profile/mime (nle/export-profile (assoc p :project/export-profile :master))))))
+(deftest proxy-preview-never-replaces-original-export-source
+  (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
+    (is (= :proxy-url (nle/media-url-key true false asset)))
+    (is (= :url (nle/media-url-key false false asset)))
+    (is (= :url (nle/media-url-key true true asset)))
+    (is (= :url (nle/media-url-key true false {:url "blob:original"})))
+    (is (= [640 360 800000]
+           ((juxt :profile/max-width :profile/max-height :profile/video-bps) nle/proxy-profile)))))
 (deftest validated-project-persistence
   (is (= p (nle/accept-project p)))
   (is (nil? (nle/accept-project (assoc p :project/schema "foreign/v1"))))
