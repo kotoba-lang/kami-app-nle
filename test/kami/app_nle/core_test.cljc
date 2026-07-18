@@ -178,6 +178,20 @@
     (is (str/includes? (nle/webvtt imported "ja") "残す"))
     (is (empty? (nle/validate-project imported)))
     (is (nil? (nle/import-webvtt base "WEBVTT\n\nbroken" "en")))))
+(deftest caption-language-clone-and-delete-workflow
+  (let [english (-> p
+                    (nle/add-caption "en-a" 0 30 "First" "en" nle/default-caption-style)
+                    (nle/add-caption "en-b" 30 60 "Second" "en" nle/default-caption-style))
+        japanese (nle/clone-caption-language english "en" "ja")
+        deleted (nle/remove-caption japanese "translation:ja:0")]
+    (is (= "ja" (:project/caption-language japanese)))
+    (is (= ["en" "ja"] (nle/caption-languages japanese)))
+    (is (= ["First" "Second"] (mapv :caption/text (filter #(= "ja" (nle/caption-language %))
+                                                            (:project/captions japanese)))))
+    (is (= ["translation:ja:1"] (mapv :caption/id (filter #(= "ja" (nle/caption-language %))
+                                                            (:project/captions deleted)))))
+    (is (= japanese (nle/clone-caption-language japanese "ja" "ja")))
+    (is (empty? (nle/validate-project deleted)))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))
