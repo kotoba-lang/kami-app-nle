@@ -18,3 +18,17 @@
     (is (= {:transition/type :fade :transition/duration-frames 12}
            (:segment/transition-out (first (nle/render-segments edited)))))
     (is (= [{:left "a" :right "b" :relation :gap :frames 35}] (nle/timeline-relations edited)))))
+(deftest professional-trim-modes
+  (let [base (nle/project {:project/fps 30 :project/tracks [{:track/id "v" :track/type :video
+              :track/clips [{:clip/id "a" :clip/source-id "a" :clip/start-frame 0 :clip/in-frame 0 :clip/out-frame 60}
+                            {:clip/id "b" :clip/source-id "b" :clip/start-frame 60 :clip/in-frame 10 :clip/out-frame 70}]}]})
+        ripple (nle/ripple-trim-out base "a" 75)
+        slip (nle/slip-clip base "b" 5)
+        roll (nle/roll-cut base "a" "b" 5)]
+    (is (= [75 75] [(get-in ripple [:project/tracks 0 :track/clips 0 :clip/out-frame])
+                     (get-in ripple [:project/tracks 0 :track/clips 1 :clip/start-frame])]))
+    (is (= [15 75 60] ((juxt :clip/in-frame :clip/out-frame :clip/start-frame)
+                        (get-in slip [:project/tracks 0 :track/clips 1]))))
+    (is (= [65 15 65] [(get-in roll [:project/tracks 0 :track/clips 0 :clip/out-frame])
+                       (get-in roll [:project/tracks 0 :track/clips 1 :clip/in-frame])
+                       (get-in roll [:project/tracks 0 :track/clips 1 :clip/start-frame])]))))

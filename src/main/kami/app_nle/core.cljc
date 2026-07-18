@@ -18,6 +18,28 @@
 (defn set-transition [p id transition-type duration-frames]
   (update-clip p id #(assoc % :clip/transition-out {:transition/type transition-type
                                                      :transition/duration-frames (max 0 duration-frames)})))
+(defn ripple-trim-out [p id new-out]
+  (let [target (some #(when (= id (:clip/id %)) %) (mapcat :track/clips (:project/tracks p)))
+        delta (- new-out (:clip/out-frame target))]
+    (if (or (nil? target) (<= new-out (:clip/in-frame target))) p
+        (update p :project/tracks
+                #(mapv (fn [track]
+                         (if (some (fn [clip] (= id (:clip/id clip))) (:track/clips track))
+                           (update track :track/clips
+                                   (fn [clips] (mapv (fn [clip]
+                                                      (cond (= id (:clip/id clip)) (assoc clip :clip/out-frame new-out)
+                                                            (> (:clip/start-frame clip) (:clip/start-frame target)) (update clip :clip/start-frame + delta)
+                                                            :else clip)) clips))) track)) %)))))
+(defn slip-clip [p id delta]
+  (update-clip p id (fn [clip] (let [new-in (+ (:clip/in-frame clip) delta) new-out (+ (:clip/out-frame clip) delta)]
+                                 (if (neg? new-in) clip (assoc clip :clip/in-frame new-in :clip/out-frame new-out))))))
+(defn roll-cut [p left-id right-id delta]
+  (let [left (some #(when (= left-id (:clip/id %)) %) (mapcat :track/clips (:project/tracks p)))
+        right (some #(when (= right-id (:clip/id %)) %) (mapcat :track/clips (:project/tracks p)))]
+    (if (or (nil? left) (nil? right) (<= (+ (:clip/out-frame left) delta) (:clip/in-frame left))
+            (neg? (+ (:clip/in-frame right) delta))) p
+        (-> p (update-clip left-id #(update % :clip/out-frame + delta))
+            (update-clip right-id #(-> % (update :clip/in-frame + delta) (update :clip/start-frame + delta)))))))
 (defn split-clip [p id frame new-id]
   (update p :project/tracks
           (fn [tracks]
