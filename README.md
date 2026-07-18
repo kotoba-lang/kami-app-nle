@@ -1,5 +1,7 @@
 # KAMI NLE
 
+TTML animation ingest accepts bounded multi-keyframe `values`, strictly increasing `keyTimes`, and one validated `keySplines` curve per interval. Up to 17 authored values become 16 project-authoritative intervals evaluated by the same preview/production path and emitted as lossless equivalent IMSC animation segments.
+
 EDN-native browser non-linear video editor for `kotoba-lang`. It owns frame/timecode transport, video and audio lanes, clip selection, trim/split/move semantics, project bin, media effects, and master export. It does not own music composition or 3D character authoring.
 
 TTML animation supports project-authoritative `linear`, `discrete`, and cubic Bézier `spline` timing. Import validates bounded `keySplines`, frame preview and production capture solve the same time-to-curve mapping, and IMSC export preserves `calcMode` plus canonical spline control points.
