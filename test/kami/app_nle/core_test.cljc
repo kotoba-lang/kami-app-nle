@@ -121,6 +121,18 @@
     (is (empty? (nle/validate-project configured)))
     (is (= [:invalid-color-pipeline]
            (nle/validate-project (assoc-in configured [:project/color-pipeline :color/output-space] :rec2020))))))
+(deftest project-authoritative-captions-and-webvtt
+  (let [captioned (-> p
+                      (nle/add-caption "cap-1" 15 75 "Hello, 海辺")
+                      (nle/add-caption "cap-2" 90 120 "Second line"))]
+    (is (= ["cap-1"] (mapv :caption/id (nle/captions-at-frame captioned 30))))
+    (is (= "WEBVTT\n\ncap-1\n00:00:00.500 --> 00:00:02.500\nHello, 海辺\n\ncap-2\n00:00:03.000 --> 00:00:04.000\nSecond line\n"
+           (nle/webvtt captioned)))
+    (is (empty? (nle/validate-project captioned)))
+    (is (= [:duplicate-caption-id]
+           (nle/validate-project (update captioned :project/captions conj (first (:project/captions captioned))))))
+    (is (= [[:invalid-caption "cap-1"]]
+           (nle/validate-project (assoc-in captioned [:project/captions 0 :caption/end-frame] 10))))))
 (deftest proxy-preview-never-replaces-original-export-source
   (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
     (is (= :proxy-url (nle/media-url-key true false asset)))

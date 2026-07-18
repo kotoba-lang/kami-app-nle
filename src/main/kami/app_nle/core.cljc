@@ -1,4 +1,4 @@
-(ns kami.app-nle.core)
+(ns kami.app-nle.core (:require [clojure.string :as str]))
 (def schema "kami.eizo-project/v1")
 (def history-limit 50)
 (def empty-history {:history/past [] :history/future []})
@@ -51,6 +51,7 @@
                            :project/master-eq flat-eq :project/master-gain 0.9
                            :project/delivery-audio default-delivery-audio
                            :project/color-pipeline default-color-pipeline
+                           :project/captions []
                            :project/assets {} :project/tracks []} m))
 (defn delivery-audio [p] (merge default-delivery-audio (:project/delivery-audio p)))
 (defn color-pipeline [p] (merge default-color-pipeline (:project/color-pipeline p)))
@@ -87,6 +88,45 @@
       :color/contrast (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
       :color/saturation (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
       p)))
+(defn add-caption [p caption-id start-frame end-frame text]
+  (if (some #(= caption-id (:caption/id %)) (:project/captions p))
+    p
+    (update p :project/captions
+            #(->> (conj (vec %) {:caption/id caption-id :caption/start-frame (max 0 start-frame)
+                                 :caption/end-frame (max (inc (max 0 start-frame)) end-frame)
+                                 :caption/text (str text)})
+                  (sort-by (juxt :caption/start-frame :caption/id)) vec))))
+(defn update-caption [p caption-id changes]
+  (update p :project/captions
+          #(->> % (mapv (fn [caption]
+                          (if (= caption-id (:caption/id caption))
+                            (let [candidate (merge caption changes) start (max 0 (:caption/start-frame candidate))]
+                              (assoc candidate :caption/start-frame start
+                                               :caption/end-frame (max (inc start) (:caption/end-frame candidate))
+                                               :caption/text (str (:caption/text candidate))))
+                            caption)))
+                (sort-by (juxt :caption/start-frame :caption/id)) vec)))
+(defn captions-at-frame [p frame]
+  (->> (:project/captions p)
+       (filter #(<= (:caption/start-frame %) frame (dec (:caption/end-frame %)))) vec))
+(declare pad2)
+(defn- pad3 [n] (cond (< n 10) (str "00" n) (< n 100) (str "0" n) :else (str n)))
+(defn frame->vtt-time [frame fps]
+  (let [raw (* 1000 (/ frame fps))
+        millis (long #?(:clj (Math/round (double raw)) :cljs (js/Math.round raw)))
+        ms (mod millis 1000) seconds-total (quot millis 1000) seconds (mod seconds-total 60)
+        minutes-total (quot seconds-total 60) minutes (mod minutes-total 60) hours (quot minutes-total 60)]
+    (str (pad2 hours) ":" (pad2 minutes) ":" (pad2 seconds) "." (pad3 ms))))
+(defn webvtt [p]
+  (str "WEBVTT\n\n"
+       (str/join "\n\n"
+                 (map (fn [caption]
+                        (str (:caption/id caption) "\n"
+                             (frame->vtt-time (:caption/start-frame caption) (:project/fps p)) " --> "
+                             (frame->vtt-time (:caption/end-frame caption) (:project/fps p)) "\n"
+                             (:caption/text caption)))
+                      (:project/captions p)))
+       (when (seq (:project/captions p)) "\n")))
 (defn register-asset
   ([p asset-id name] (register-asset p asset-id name nil))
   ([p asset-id name sha256]
@@ -267,6 +307,15 @@
                    (<= 0 (:color/contrast color) 3)
                    (<= 0 (:color/saturation color) 3))
       [:invalid-color-pipeline]))
+  (for [caption (:project/captions p)
+        :when (or (not (string? (:caption/id caption))) (str/blank? (:caption/id caption))
+                  (boolean (re-find #"[\r\n]" (:caption/id caption)))
+                  (not (string? (:caption/text caption))) (str/blank? (:caption/text caption))
+                  (neg? (:caption/start-frame caption))
+                  (not (< (:caption/start-frame caption) (:caption/end-frame caption))))]
+    [:invalid-caption (:caption/id caption)])
+  (when (not= (count (:project/captions p)) (count (set (map :caption/id (:project/captions p)))))
+    [:duplicate-caption-id])
   (for [c (mapcat :track/clips (:project/tracks p)) :when (or (neg? (:clip/start-frame c)) (>= (:clip/in-frame c) (:clip/out-frame c)))] [:invalid-clip (:clip/id c)])
   (for [c (mapcat :track/clips (:project/tracks p)) :when (and (:clip/audio-eq c) (not (valid-eq? (:clip/audio-eq c))))] [:invalid-clip-eq (:clip/id c)])
   (for [c (audio-clips p) :when (or (neg? (or (:clip/fade-in-sec c) 0)) (neg? (or (:clip/fade-out-sec c) 0)))] [:invalid-audio-fade (:clip/id c)])

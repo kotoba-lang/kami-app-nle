@@ -7,7 +7,7 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :caption-text "" :caption-duration-frames 60 :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96}))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
@@ -103,7 +103,11 @@
           fade-sec (when transition (/ (:transition/duration-frames transition) (get-in @state [:project :project/fps])))
           fade-alpha (if (and (= :fade (:transition/type transition)) fade-sec (pos? fade-sec) remaining (< remaining fade-sec)) (max 0 (/ remaining fade-sec)) 1)
           dissolve (:dissolve @state)
-          progress (when dissolve (min 1 (max 0 (/ (- (js/performance.now) (:started-ms dissolve)) (:duration-ms dissolve)))))]
+          progress (when dissolve (min 1 (max 0 (/ (- (js/performance.now) (:started-ms dissolve)) (:duration-ms dissolve)))))
+          fps (get-in @state [:project :project/fps])
+          caption-frame (if (and segment elapsed)
+                          (js/Math.floor (* (+ (:segment/timeline-start-sec segment) elapsed) fps))
+                          (:frame @state))]
       (when (>= (.-readyState v) 2)
         (let [creative (get filters (:effect @state) "none")]
           (set! (.-filter ctx) (str (color-filter (:project @state)) (when-not (= "none" creative) (str " " creative)))))
@@ -111,8 +115,17 @@
         (set! (.-globalAlpha ctx) (if progress (- 1 progress) fade-alpha)) (.drawImage ctx v 0 0 (.-width c) (.-height c))
         (when (and progress overlay (>= (.-readyState overlay) 2))
           (set! (.-globalAlpha ctx) progress) (.drawImage ctx overlay 0 0 (.-width c) (.-height c)))
+        (set! (.-filter ctx) "none") (set! (.-globalAlpha ctx) 1)
+        (doseq [[index caption] (map-indexed vector (nle/captions-at-frame (:project @state) caption-frame))]
+          (let [text (:caption/text caption) font-size (max 18 (js/Math.round (* (.-height c) 0.055)))
+                y (- (.-height c) (* (+ 1 index) (* font-size 1.45)))]
+            (set! (.-font ctx) (str "600 " font-size "px sans-serif")) (set! (.-textAlign ctx) "center")
+            (let [width (+ 24 (.-width (.measureText ctx text)))]
+              (set! (.-fillStyle ctx) "rgba(0,0,0,0.72)")
+              (.fillRect ctx (- (/ (.-width c) 2) (/ width 2)) (- y font-size) width (* font-size 1.3)))
+            (set! (.-fillStyle ctx) "white") (.fillText ctx text (/ (.-width c) 2) y)))
         (set! (.-globalAlpha ctx) 1)
-        (swap! state assoc :frame (js/Math.floor (* (.-currentTime v) (get-in @state [:project :project/fps])))
+        (swap! state assoc :frame caption-frame
                :audio-meter-db (audio-meter-db)))
       (js/requestAnimationFrame draw-frame!))))
 (defn active-asset-url [asset]
@@ -265,6 +278,14 @@
   (let [url (js/URL.createObjectURL blob) a (.createElement js/document "a")]
     (set! (.-href a) url) (set! (.-download a) filename) (.click a)
     (js/setTimeout #(js/URL.revokeObjectURL url) 1000)))
+(defn add-caption-at-playhead! []
+  (let [text (:caption-text @state) start (:frame @state) duration (:caption-duration-frames @state)]
+    (when (seq text)
+      (swap! state update :project nle/add-caption (str "caption:" (js/Date.now)) start (+ start duration) text)
+      (swap! state assoc :caption-text ""))))
+(defn export-webvtt! []
+  (download-file! (js/Blob. #js [(nle/webvtt (:project @state))] #js {:type "text/vtt;charset=utf-8"})
+                  "kami-nle-captions.vtt"))
 (defn export-package! []
   (let [project (:project @state) asset-ids (sort (keys (:project/assets project)))
         missing (vec (remove #(get-in @state [:assets % :blob]) asset-ids))
@@ -769,6 +790,27 @@
                                           :value (get color key) :aria-label label
                                           :on-change #(swap! state update :project nle/set-color-pipeline key
                                                              (js/parseFloat (.. % -target -value)))}]])
+    [:label "Caption text" [:input {:value (:caption-text @state) :aria-label "New caption text"
+                                      :on-change #(swap! state assoc :caption-text (.. % -target -value))}]]
+    [:label "Caption frames" [:input {:type "number" :min 1 :step 1 :value (:caption-duration-frames @state)
+                                        :aria-label "New caption duration frames"
+                                        :on-change #(swap! state assoc :caption-duration-frames
+                                                           (max 1 (js/parseInt (.. % -target -value))))}]]
+    [:button {:on-click add-caption-at-playhead! :disabled (empty? (:caption-text @state))} "Add caption at playhead"]
+    (for [caption (:project/captions project)]
+      ^{:key (:caption/id caption)} [:div.asset
+       [:input {:value (:caption/text caption) :aria-label (str (:caption/id caption) " text")
+                :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
+                                   {:caption/text (.. % -target -value)})}]
+       [:input {:type "number" :min 0 :value (:caption/start-frame caption)
+                :aria-label (str (:caption/id caption) " start frame")
+                :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
+                                   {:caption/start-frame (js/parseInt (.. % -target -value))})}]
+       [:input {:type "number" :min 1 :value (:caption/end-frame caption)
+                :aria-label (str (:caption/id caption) " end frame")
+                :on-change #(swap! state update :project nle/update-caption (:caption/id caption)
+                                   {:caption/end-frame (js/parseInt (.. % -target -value))})}]])
+    [:button {:on-click export-webvtt! :disabled (empty? (:project/captions project))} "Export WebVTT"]
     (when-let [clip (selected-clip project selected)]
       [:div.asset [:strong (str "Edit • " (:clip/name clip))]
        [:label "Source in" [:input {:type "number" :min 0 :value (:clip/in-frame clip) :on-change #(edit-trim! clip :in (js/parseInt (.. % -target -value)))}]]
