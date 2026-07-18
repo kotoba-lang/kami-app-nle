@@ -20,4 +20,4 @@ npm run check
 npm run release
 ```
 
-Maturity: **逍遥** — multi-asset binding, source trim editing, gap/overlap classification, fade rendering, canvas effects, and timeline-ordered WebM export are implemented. Pointer trim handles, ripple/roll/slip modes, overlap compositing, proxies, color management, meters, and codec/container selection remain follow-up scope.
+Maturity: **逍遥** — multi-asset binding, source trim, ripple trim, roll and slip modes, gap/overlap classification, fade rendering, canvas effects, and timeline-ordered WebM export are implemented. Pointer drag handles, overlap compositing/cross-dissolve, proxies, color management, meters, and codec/container selection remain follow-up scope.
