@@ -1,6 +1,6 @@
 (ns kami.app-nle.ui
   (:require [reagent.core :as r] [reagent.dom.client :as rdom] [cljs.reader :as reader] [clojure.string :as str]
-            [kami.app-nle.core :as nle]
+            [kami.app-nle.core :as nle] [kami.app-nle.bench :as bench]
             [html.core :as html]
             [kami.app-nle.asset-sources :as asset-sources]
             [kami.app-nle.cache :as cache]
@@ -14,6 +14,8 @@
   (html/html [:meta {:name "kotoba:app-shell" :content "kami-nle single-screen liquid-glass"}]
              [:noscript "KAMI NLE requires JavaScript for media decode and rendering."]))
 (defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :caption-text "" :caption-duration-frames 60 :caption-language "en" :caption-position :bottom :caption-align :center :caption-font-scale 1.0 :review-author "editor" :caption-review-drafts {} :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96 :network-sources [] :network-source-status "Not loaded"}))
+(defonce bench-run (r/atom (bench/initial-run)))
+(defn bench-panel [] [:aside.bench-panel [:strong "User test loop"] [:p "Select a persona and record observations in the test log."]])
 (declare load-media!)
 (defn load-network-sources! []
   (swap! state assoc :network-source-status "Loading network-isekai and kotobase.net…")
