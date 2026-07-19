@@ -1,4 +1,5 @@
-(ns kami.app-nle.core-test (:require [clojure.test :refer [deftest is]] [kami.app-nle.core :as nle]))
+(ns kami.app-nle.core-test (:require [clojure.test :refer [deftest is]] [clojure.string :as str]
+                                     [kami.app-nle.core :as nle]))
 (def p (nle/project {:project/tracks [{:track/id "v" :track/clips [{:clip/id "c" :clip/start-frame 0 :clip/in-frame 10 :clip/out-frame 110}]}]}))
 (deftest editing (is (= "00:00:02:00" (nle/timecode 60 30))) (is (= 100 (nle/duration-frames p)))
  (is (= 2 (count (get-in (nle/split-clip p "c" 40 "c-b") [:project/tracks 0 :track/clips])))) (is (empty? (nle/validate-project p))))
@@ -7,7 +8,8 @@
         bound (assoc-in bound [:project/tracks 0 :track/clips 0 :clip/source-id] "asset:a")]
     (is (= "c" (:clip/id (nle/clip-at-frame bound 50))))
     (is (= [{:segment/clip-id "c" :segment/source-id "asset:a" :segment/timeline-start-sec 0
-             :segment/source-start-sec 1/3 :segment/duration-sec 10/3 :segment/audio-gain 1.0 :segment/transition-out nil}]
+             :segment/source-start-sec 1/3 :segment/duration-sec 10/3 :segment/audio-gain 1.0
+             :segment/audio-eq nle/flat-eq :segment/transition-out nil}]
            (nle/render-segments bound)))))
 (deftest trim-transition-and-relations
   (let [base (nle/project {:project/fps 30 :project/tracks [{:track/id "v" :track/type :video
@@ -32,17 +34,431 @@
     (is (= [65 15 65] [(get-in roll [:project/tracks 0 :track/clips 0 :clip/out-frame])
                        (get-in roll [:project/tracks 0 :track/clips 1 :clip/in-frame])
                        (get-in roll [:project/tracks 0 :track/clips 1 :clip/start-frame])]))))
+(deftest pointer-edge-trim-preserves-source-timeline-alignment
+  (let [trimmed-in (nle/trim-edge p "c" :in 5)
+        trimmed-out (nle/trim-edge p "c" :out -10)]
+    (is (= [15 5 110] ((juxt :clip/in-frame :clip/start-frame :clip/out-frame)
+                        (get-in trimmed-in [:project/tracks 0 :track/clips 0]))))
+    (is (= [10 0 100] ((juxt :clip/in-frame :clip/start-frame :clip/out-frame)
+                        (get-in trimmed-out [:project/tracks 0 :track/clips 0]))))
+    (is (= p (nle/trim-edge p "c" :in -20)))
+    (is (= p (nle/trim-edge p "c" :out -100)))))
 (deftest production-audio-mix-authority
   (let [bound (-> p (assoc-in [:project/tracks 0 :track/type] :video)
                   (assoc-in [:project/tracks 0 :track/clips 0 :clip/source-id] "asset:a"))
         mixed (nle/set-clip-audio-gain bound "c" 0.35)]
     (is (= 0.35 (:segment/audio-gain (first (nle/render-segments mixed)))))
     (is (= 2 (:clip/audio-gain (first (nle/video-clips (nle/set-clip-audio-gain bound "c" 9))))))))
+(deftest project-authoritative-three-band-eq
+  (let [bound (-> p (assoc-in [:project/tracks 0 :track/type] :video)
+                  (assoc-in [:project/tracks 0 :track/clips 0 :clip/source-id] "asset:a"))
+        equalized (-> bound (nle/set-clip-eq "c" :low-db 6.5)
+                      (nle/set-clip-eq "c" :mid-db -20)
+                      (nle/set-master-eq :high-db 4.0))]
+    (is (= {:low-db 6.5 :mid-db -12.0 :high-db 0.0}
+           (:segment/audio-eq (first (nle/render-segments equalized)))))
+    (is (= {:low-db 0.0 :mid-db 0.0 :high-db 4.0} (:project/master-eq equalized)))
+    (is (empty? (nle/validate-project equalized)))
+    (is (= [[:invalid-clip-eq "c"]]
+           (nle/validate-project (assoc-in equalized [:project/tracks 0 :track/clips 0 :clip/audio-eq :low-db] 30))))))
+(deftest independent-audio-lane-binding-and-render-authority
+  (let [bound (nle/bind-audio-asset p "asset:audio" "dialogue.wav" 90)
+        clip (first (nle/audio-clips bound)) segment (first (nle/audio-segments bound))]
+    (is (= ["asset:audio" 0 90] ((juxt :clip/source-id :clip/in-frame :clip/out-frame) clip)))
+    (is (= {:segment/clip-id (:clip/id clip) :segment/source-id "asset:audio"
+            :segment/timeline-start-sec 0 :segment/source-start-sec 0 :segment/duration-sec 3
+            :segment/audio-gain 1.0 :segment/audio-eq nle/flat-eq
+            :segment/fade-in-sec 0 :segment/fade-out-sec 0 :segment/gain-automation []} segment))
+    (is (empty? (nle/validate-project bound)))
+    (is (= bound (nle/bind-audio-asset bound "asset:audio" "renamed.wav" 300)))
+    (is (= 2 (count (nle/audio-clips (nle/bind-audio-asset bound "asset:music" "music.wav" 120)))))))
+(deftest audio-fade-crossfade-and-gain-envelope
+  (let [bound (nle/bind-audio-asset p "asset:audio" "dialogue.wav" 120)
+        id (:clip/id (first (nle/audio-clips bound)))
+        automated (-> bound (nle/set-audio-fades id 0.5 1.0)
+                      (nle/set-audio-gain-automation id [{:sec 2 :gain 0.5} {:sec 0 :gain 1.5}]))
+        segment (first (nle/audio-segments automated))]
+    (is (= [0.5 1.0] ((juxt :segment/fade-in-sec :segment/fade-out-sec) segment)))
+    (is (= [{:automation/sec 0 :automation/gain 1.5} {:automation/sec 2 :automation/gain 0.5}]
+           (:segment/gain-automation segment)))
+    (is (= 1.0 (nle/automation-value-at 1.0 (:segment/gain-automation segment) 1)))
+    (is (= 0.5 (nle/fade-value-at 4 1 1 0.5)))
+    (is (= 0.5 (nle/fade-value-at 4 1 1 3.5)))
+    (is (empty? (nle/validate-project automated)))
+    (is (= [[:invalid-audio-automation id]]
+           (nle/validate-project (assoc-in automated [:project/tracks 1 :track/clips 0 :clip/audio-gain-automation]
+                                           [{:automation/sec 2 :automation/gain 1} {:automation/sec 1 :automation/gain 1}]))))))
 (deftest production-export-profile
   (is (= ["video/webm;codecs=vp8,opus" 2000000]
          ((juxt :profile/mime :profile/video-bps) (nle/export-profile p))))
   (is (= "video/webm;codecs=vp9,opus"
-         (:profile/mime (nle/export-profile (assoc p :project/export-profile :master))))))
+         (:profile/mime (nle/export-profile (assoc p :project/export-profile :master)))))
+  (let [mp4 (nle/export-profile (assoc p :project/export-profile :mp4-master))]
+    (is (= [:mp4 "mp4" "kami-nle-master.mp4"]
+           [(:profile/container mp4) (:profile/extension mp4) (nle/export-filename mp4)]))
+    (is (= 3 (count (:profile/mimes mp4))))))
+(deftest project-authoritative-delivery-loudness
+  (let [configured (-> p
+                       (nle/set-delivery-audio :delivery/target-lufs -40)
+                       (nle/set-delivery-audio :delivery/sample-peak-ceiling-db 2))]
+    (is (= [-30.0 0.0]
+           ((juxt :delivery/target-lufs :delivery/sample-peak-ceiling-db)
+            (:project/delivery-audio configured))))
+    (is (< (abs (- -20.691 (nle/integrated-lufs [0.01 0.01 0.0]))) 0.001))
+    (is (= -2.0 (nle/normalization-gain-db -20.0 -0.5 -14.0 -2.5)))
+    (is (= 6.0 (nle/normalization-gain-db -20.0 -10.0 -14.0 -1.0)))
+    (is (empty? (nle/validate-project configured)))
+    (is (= [:invalid-delivery-audio]
+           (nle/validate-project (assoc-in configured [:project/delivery-audio :delivery/target-lufs] 1))))))
+(deftest project-authoritative-color-pipeline
+  (let [configured (-> p
+                       (nle/set-color-pipeline :color/output-space :display-p3)
+                       (nle/set-color-pipeline :color/exposure-stops 8)
+                       (nle/set-color-pipeline :color/contrast -1)
+                       (nle/set-color-pipeline :color/saturation 2.25))]
+    (is (= {:color/config :builtin :color/input-space :media-native :color/output-space :display-p3
+            :color/transfer :srgb :color/primaries :rec709 :color/matrix :rgb :color/range :full
+            :color/exposure-stops 5.0 :color/contrast 0.0 :color/saturation 2.25}
+           (:project/color-pipeline configured)))
+    (is (empty? (nle/validate-project configured)))
+    (is (= [:invalid-color-pipeline]
+           (nle/validate-project (assoc-in configured [:project/color-pipeline :color/output-space] :unknown))))))
+(deftest hdr-and-ocio-authority
+  (let [mastering {:mastering/min-luminance-nits 0.005 :mastering/max-luminance-nits 1000
+                   :mastering/max-cll-nits 1000 :mastering/max-fall-nits 400}
+        hdr (-> p (nle/set-color-pipeline :color/config :ocio)
+                (nle/set-color-pipeline :color/input-space "ACEScg")
+                (nle/set-color-pipeline :color/output-space :rec2020)
+                (nle/set-color-pipeline :color/transfer :pq)
+                (nle/set-color-pipeline :color/primaries :rec2020)
+                (nle/set-color-pipeline :color/matrix :bt2020-ncl)
+                (nle/set-color-pipeline :color/range :limited)
+                (nle/set-color-pipeline :color/mastering-display mastering))]
+    (is (nle/hdr-pipeline? (:project/color-pipeline hdr)))
+    (is (empty? (nle/validate-project hdr)))
+    (is (= [:invalid-color-pipeline]
+           (nle/validate-project (update-in hdr [:project/color-pipeline] dissoc :color/mastering-display))))))
+(deftest external-container-capability-and-imf-validation
+  (let [mov (assoc p :project/export-profile :mov-hdr)
+        report (nle/export-capability-report mov #{:mov :pcm})
+        package #:package{:id "urn:uuid:test" :edit-rate [24 1]
+                          :assets [{:asset/id "pic" :asset/type :picture :asset/sha256 (apply str (repeat 64 "a"))}]
+                          :composition {:composition/tracks [{:track/asset-id "pic"}]}}]
+    (is (= [:hdr10 :prores] (:export/missing report)))
+    (is (false? (:export/ready? report)))
+    (is (empty? (nle/imf-package-errors package)))
+    (is (= [[:missing-track-asset "missing"]]
+           (nle/imf-package-errors (assoc-in package [:package/composition :composition/tracks 0 :track/asset-id] "missing"))))))
+(deftest project-authoritative-captions-and-webvtt
+  (let [captioned (-> p
+                      (nle/add-caption "cap-1" 15 75 "Hello, 海辺")
+                      (nle/add-caption "cap-2" 90 120 "Second line"))]
+    (is (= ["cap-1"] (mapv :caption/id (nle/captions-at-frame captioned 30))))
+    (is (= "WEBVTT\n\ncap-1\n00:00:00.500 --> 00:00:02.500\nHello, 海辺\n\ncap-2\n00:00:03.000 --> 00:00:04.000\nSecond line\n"
+           (nle/webvtt captioned)))
+    (is (empty? (nle/validate-project captioned)))
+    (is (= [:duplicate-caption-id]
+           (nle/validate-project (update captioned :project/captions conj (first (:project/captions captioned))))))
+    (is (= [[:invalid-caption "cap-1"]]
+           (nle/validate-project (assoc-in captioned [:project/captions 0 :caption/end-frame] 10))))))
+(deftest styled-multiline-caption-contract
+  (let [captioned (nle/add-caption p "styled" 0 60 "First line\nSecond line"
+                                   {:caption/position :top :caption/align :left :caption/font-scale 1.5})
+        caption (first (:project/captions captioned))
+        clamped (nle/update-caption captioned "styled"
+                                    {:caption/style {:caption/position :invalid :caption/align :right
+                                                     :caption/font-scale 9}})]
+    (is (= {:caption/position :top :caption/align :left :caption/font-scale 1.5}
+           (:caption/style caption)))
+    (is (= {:caption/position :bottom :caption/align :right :caption/font-scale 2.0}
+           (get-in clamped [:project/captions 0 :caption/style])))
+    (is (str/includes? (nle/webvtt captioned) "First line\nSecond line"))
+    (is (empty? (nle/validate-project captioned)))
+    (is (= [[:invalid-caption "styled"]]
+           (nle/validate-project (assoc-in captioned [:project/captions 0 :caption/style :caption/font-scale] 4))))))
+(deftest caption-region-geometry-round-trips-to-imsc
+  (let [style {:caption/position :top :caption/align :right :caption/font-scale 1.1
+               :caption/x-percent 12.5 :caption/y-percent 7.5
+               :caption/width-percent 70.0 :caption/height-percent 22.0}
+        project (nle/add-caption p "geometry" 0 30 "Placed" "en" style)
+        xml (nle/imsc1 project "en")]
+    (is (= style (get-in project [:project/captions 0 :caption/style])))
+    (is (str/includes? xml "xml:id=\"geometry-0\" tts:origin=\"12.5% 7.5%\" tts:extent=\"70.0% 22.0%\""))
+    (is (str/includes? xml "region=\"geometry-0\""))))
+(deftest caption-region-layout-properties-round-trip-to-imsc
+  (let [style {:caption/position :bottom :caption/align :right :caption/font-scale 1.0
+               :caption/writing-mode :rltb :caption/padding-percent [2.0 3.0 4.0 5.0]
+               :caption/display-align :center}
+        project (nle/add-caption p "layout" 0 30 "مرحبا" "en" style)
+        xml (nle/imsc1 project "en")]
+    (is (= style (get-in project [:project/captions 0 :caption/style])))
+    (is (str/includes? xml "tts:writingMode=\"rltb\""))
+    (is (str/includes? xml "tts:padding=\"2.0% 3.0% 4.0% 5.0%\""))
+    (is (str/includes? xml "tts:displayAlign=\"center\""))))
+(deftest caption-ruby-runs-round-trip-to-imsc
+  (let [style (assoc nle/default-caption-style :caption/ruby-runs
+                     [{:ruby/base "漢字" :ruby/text "かんじ"}])
+        project (nle/add-caption p "ruby" 0 30 "この漢字です" "ja" style)
+        xml (nle/imsc1 project "ja")]
+    (is (= [{:ruby/base "漢字" :ruby/text "かんじ"}]
+           (get-in project [:project/captions 0 :caption/style :caption/ruby-runs])))
+    (is (str/includes? xml "この<span tts:ruby=\"container\"><span tts:ruby=\"base\">漢字</span><span tts:ruby=\"text\">かんじ</span></span>です"))
+    (is (empty? (nle/validate-project project)))))
+(deftest caption-line-breaking-is-language-aware-and-kinsoku-safe
+  (let [japanese (nle/caption-line-breaks "「成熟度」を、さらに向上します。" "ja" 6)
+        english (nle/caption-line-breaks "production export keeps words together" "en" 12)]
+    (is (every? #(not (contains? nle/kinsoku-line-start (first %))) (rest japanese)))
+    (is (every? #(not (contains? nle/kinsoku-line-end (last %))) (butlast japanese)))
+    (is (= "「成熟度」を、さらに向上します。" (apply str japanese)))
+    (is (= ["production" "export keeps" "words" "together"] english))
+    (is (= ["abcd" "efgh" "ij"] (nle/caption-line-breaks "abcdefghij" "en" 4)))))
+(deftest continuous-caption-animation-interpolates-and-exports
+  (let [style (assoc nle/default-caption-style :caption/animations
+                     [{:animation/property :opacity :animation/from 0 :animation/to 1
+                       :animation/start-frame 30 :animation/end-frame 60}
+                      {:animation/property :font-scale :animation/from 1 :animation/to 1.5
+                       :animation/start-frame 30 :animation/end-frame 60}])
+        project (-> p (nle/add-caption "animated" 30 90 "Fade" "en" style)
+                    (nle/set-caption-status "animated" :approved "editor" 1))
+        caption (first (:project/captions project)) mid (nle/caption-style-at-frame caption 45)
+        xml (nle/imsc1 project "en")]
+    (is (= 0.5 (:caption/opacity mid)))
+    (is (= 1.25 (:caption/font-scale mid)))
+    (is (= 1.0 (:caption/opacity (nle/caption-style-at-frame caption 60))))
+    (is (str/includes? xml "<animate attributeName=\"tts:opacity\" from=\"0.0\" to=\"1.0\" begin=\"0.0s\" dur=\"1.0s\" calcMode=\"linear\" fill=\"freeze\"/>"))
+    (is (str/includes? xml "attributeName=\"tts:fontSize\" from=\"100.0%\" to=\"150.0%\""))))
+(deftest spline-and-discrete-caption-animation-share-preview-and-imsc-authority
+  (let [style (assoc nle/default-caption-style :caption/animations
+                     [{:animation/property :opacity :animation/from 0 :animation/to 1
+                       :animation/start-frame 0 :animation/end-frame 30
+                       :animation/interpolation :spline
+                       :animation/key-spline [0.42 0.0 1.0 1.0]}
+                      {:animation/property :font-scale :animation/from 1 :animation/to 1.5
+                       :animation/start-frame 0 :animation/end-frame 30
+                       :animation/interpolation :discrete}])
+        project (-> p (nle/add-caption "eased" 0 60 "Ease" "en" style)
+                    (nle/set-caption-status "eased" :approved "editor" 1))
+        caption (first (:project/captions project))
+        mid (nle/caption-style-at-frame caption 15)
+        xml (nle/imsc1 project "en")]
+    (is (< 0.2 (:caption/opacity mid) 0.4))
+    (is (= 1.0 (:caption/font-scale mid)))
+    (is (= 1.5 (:caption/font-scale (nle/caption-style-at-frame caption 30))))
+    (is (str/includes? xml "calcMode=\"spline\" keySplines=\"0.42 0.0 1.0 1.0\""))
+    (is (str/includes? xml "calcMode=\"discrete\""))
+    (is (empty? (:caption/animations
+                 (nle/normalize-caption-style
+                  (assoc style :caption/animations
+                         [(assoc (first (:caption/animations style))
+                                 :animation/key-spline [0.8 0 0.2 1])])))))))
+(deftest multi-keyframe-animation-expands-to-authoritative-segments
+  (let [segments (nle/animation-keyframe-segments
+                  :opacity [0 0.25 1] [0 0.2 1] :spline
+                  [[0.42 0 1 1] [0 0 0.58 1]] 30 130)
+        style (assoc nle/default-caption-style :caption/animations segments)
+        project (-> p (nle/add-caption "keys" 30 130 "Keys" "en" style)
+                    (nle/set-caption-status "keys" :approved "editor" 1))
+        caption (first (:project/captions project)) xml (nle/imsc1 project "en")]
+    (is (= [[30 50] [50 130]] (mapv (juxt :animation/start-frame :animation/end-frame) segments)))
+    (is (< (Math/abs (- 0.25 (:caption/opacity (nle/caption-style-at-frame caption 50)))) 1.0e-8))
+    (is (= 2 (count (re-seq #"calcMode=\"spline\"" xml))))
+    (is (empty? (nle/animation-keyframe-segments :opacity [0 1 0] [0 0.8 0.7] :linear [] 0 30)))))
+(deftest caption-animation-editor-validates-project-authoritative-curves
+  (let [style (assoc nle/default-caption-style :caption/animations
+                     [{:animation/property :opacity :animation/from 0 :animation/to 1
+                       :animation/start-frame 0 :animation/end-frame 30
+                       :animation/interpolation :linear}])
+        project (nle/add-caption p "edit" 0 60 "Edit" "en" style)
+        curved (nle/edit-caption-animation project "edit" 0
+                                           {:animation/interpolation :spline
+                                            :animation/key-spline [0.42 0 0.58 1]})
+        rejected (nle/edit-caption-animation curved "edit" 0
+                                             {:animation/key-spline [0.9 0 0.1 1]})]
+    (is (= :spline (get-in curved [:project/captions 0 :caption/style :caption/animations 0
+                                   :animation/interpolation])))
+    (is (= [0.42 0.0 0.58 1.0]
+           (get-in curved [:project/captions 0 :caption/style :caption/animations 0
+                           :animation/key-spline])))
+    (is (= curved rejected))))
+(deftest multilingual-caption-selection-and-delivery
+  (let [localized (-> p
+                      (nle/add-caption "en-1" 0 60 "Hello" "en" nle/default-caption-style)
+                      (nle/add-caption "ja-1" 0 60 "こんにちは" "ja" nle/default-caption-style))
+        japanese (nle/set-caption-language localized "ja")]
+    (is (= ["en" "ja"] (nle/caption-languages localized)))
+    (is (= ["en-1"] (mapv :caption/id (nle/captions-at-frame localized 30))))
+    (is (= ["ja-1"] (mapv :caption/id (nle/captions-at-frame japanese 30))))
+    (is (str/includes? (nle/webvtt localized "en") "Hello"))
+    (is (not (str/includes? (nle/webvtt localized "en") "こんにちは")))
+    (is (str/includes? (nle/webvtt japanese) "こんにちは"))
+    (is (empty? (nle/validate-project japanese)))
+    (is (= [:invalid-caption-language]
+           (nle/validate-project (assoc japanese :project/caption-language "not valid"))))))
+(deftest webvtt-import-replaces-one-language-and-round-trips
+  (let [base (-> p
+                 (nle/add-caption "en-old" 0 30 "Old" "en" nle/default-caption-style)
+                 (nle/add-caption "ja-old" 0 30 "残す" "ja" nle/default-caption-style))
+        source "﻿WEBVTT imported captions\nKind: captions\n\nNOTE translator context\nDo not import this\n\nexternal-id\n00:00:00.500 --> 00:00:02.500 align:start\nFirst line\nSecond line\n"
+        imported (nle/import-webvtt base source "en")
+        english (first (filter #(= "en" (nle/caption-language %)) (:project/captions imported)))]
+    (is (= 15 (:caption/start-frame english)))
+    (is (= 75 (:caption/end-frame english)))
+    (is (= "First line\nSecond line" (:caption/text english)))
+    (is (= :draft (nle/caption-status english)))
+    (is (= ["en" "ja"] (nle/caption-languages imported)))
+    (is (not (str/includes? (nle/webvtt imported "en") "00:00:00.500 --> 00:00:02.500")))
+    (is (str/includes? (nle/webvtt imported "ja") "残す"))
+    (is (empty? (nle/validate-project imported)))
+    (is (nil? (nle/import-webvtt base "WEBVTT\n\nbroken" "en")))))
+(deftest caption-language-clone-and-delete-workflow
+  (let [english (-> p
+                    (nle/add-caption "en-a" 0 30 "First" "en" nle/default-caption-style)
+                    (nle/add-caption "en-b" 30 60 "Second" "en" nle/default-caption-style)
+                    (nle/set-caption-reviewer "en-a" "source-reviewer"))
+        japanese (nle/clone-caption-language english "en" "ja")
+        deleted (nle/remove-caption japanese "translation:ja:0")]
+    (is (= "ja" (:project/caption-language japanese)))
+    (is (= ["en" "ja"] (nle/caption-languages japanese)))
+    (is (= ["First" "Second"] (mapv :caption/text (filter #(= "ja" (nle/caption-language %))
+                                                            (:project/captions japanese)))))
+    (is (= [:draft :draft] (mapv nle/caption-status (filter #(= "ja" (nle/caption-language %))
+                                                             (:project/captions japanese)))))
+    (is (every? nil? (map :caption/reviewer (filter #(= "ja" (nle/caption-language %))
+                                                     (:project/captions japanese)))))
+    (is (= ["translation:ja:1"] (mapv :caption/id (filter #(= "ja" (nle/caption-language %))
+                                                            (:project/captions deleted)))))
+    (is (= japanese (nle/clone-caption-language japanese "ja" "ja")))
+    (is (empty? (nle/validate-project deleted)))))
+(deftest only-approved-captions-reach-preview-and-delivery
+  (let [captions (-> p
+                     (nle/add-caption "approved" 0 60 "Ship" "en" nle/default-caption-style)
+                     (nle/add-caption "draft" 0 60 "Do not ship" "en" nle/default-caption-style)
+                     (nle/set-caption-status "draft" :draft))
+        approved-draft (nle/set-caption-status captions "draft" :approved)]
+    (is (= ["approved"] (mapv :caption/id (nle/captions-at-frame captions 30))))
+    (is (str/includes? (nle/webvtt captions) "Ship"))
+    (is (not (str/includes? (nle/webvtt captions) "Do not ship")))
+    (is (= ["approved" "draft"] (mapv :caption/id (nle/captions-at-frame approved-draft 30))))
+    (is (empty? (nle/validate-project captions)))
+    (is (= [[:invalid-caption "draft"]]
+           (nle/validate-project (assoc-in captions [:project/captions 1 :caption/status] :rejected))))))
+(deftest imsc1-text-export-is-approved-localized-styled-and-escaped
+  (let [captions (-> p
+                     (nle/add-caption "approved" 0 60 "Ship & <go>\nNow" "en"
+                                      {:caption/position :top :caption/align :left :caption/font-scale 1.2})
+                     (nle/add-caption "draft" 60 90 "Do not ship" "en" nle/default-caption-style)
+                     (nle/set-caption-status "draft" :draft))
+        xml (nle/imsc1 captions "en")]
+    (is (str/includes? xml "ttp:contentProfiles=\"http://www.w3.org/ns/ttml/profile/imsc1.2/text\""))
+    (is (str/includes? xml "ttp:frameRate=\"30\""))
+    (is (str/includes? xml "region=\"top\" tts:textAlign=\"left\" tts:fontSize=\"120.0%\""))
+    (is (str/includes? xml "Ship &amp; &lt;go&gt;<br/>Now"))
+    (is (str/includes? xml "xml:id=\"cue-0-approved\""))
+    (is (not (str/includes? xml "Do not ship")))
+    (is (str/includes? xml "begin=\"00:00:00.000\" end=\"00:00:02.000\""))))
+(deftest normalized-imsc-import-replaces-language-as-draft-and-cascades-review-state
+  (let [existing (-> p
+                     (nle/add-caption "old" 0 30 "Old" "en" nle/default-caption-style)
+                     (nle/start-caption-review-thread "old" "thread" "editor" "Check @lead" 1000))
+        imported (nle/import-imsc-cues existing "en"
+                                       [{:caption/start-frame 15 :caption/end-frame 75
+                                         :caption/text "Imported\ncaption"
+                                         :caption/style {:caption/position :top :caption/align :left
+                                                         :caption/font-scale 1.2}}])
+        cue (first (:project/captions imported))]
+    (is (= "imsc:en:0" (:caption/id cue)))
+    (is (= :draft (nle/caption-status cue)))
+    (is (= "Imported\ncaption" (:caption/text cue)))
+    (is (= {:caption/position :top :caption/align :left :caption/font-scale 1.2} (:caption/style cue)))
+    (is (empty? (:project/review-notifications imported)))
+    (is (empty? (nle/validate-project imported)))
+    (is (nil? (nle/import-imsc-cues existing "en" [{:caption/start-frame 20 :caption/end-frame 10
+                                                       :caption/text "bad"}])))))
+(deftest imsc-time-expressions-normalize-to-project-frames
+  (is (nil? (nle/imsc-time->frame nil 30)))
+  (is (= 45 (nle/imsc-time->frame "1.5s" 30)))
+  (is (= 45 (nle/imsc-time->frame "00:00:01:15" 30)))
+  (is (= 45 (nle/imsc-time->frame "00:00:01.500" 30)))
+  (is (nil? (nle/imsc-time->frame "00:00:01:30" 30))))
+(deftest caption-review-notes-and-status-history-are-auditable
+  (let [captioned (nle/add-caption p "cue" 0 60 "Review me" "en" nle/default-caption-style)
+        reviewed (-> captioned
+                     (nle/add-caption-review-note "cue" "note-1" "mika" "Timing checked" 1000)
+                     (nle/set-caption-status "cue" :review "mika" 1100)
+                     (nle/set-caption-status "cue" :approved "lead" 1200))
+        cue (first (:project/captions reviewed))]
+    (is (= [{:review/id "note-1" :review/author "mika" :review/text "Timing checked" :review/at 1000}]
+           (:caption/review-notes cue)))
+    (is (= [{:status/from :approved :status/to :review :status/actor "mika" :status/at 1100}
+            {:status/from :review :status/to :approved :status/actor "lead" :status/at 1200}]
+           (:caption/status-history cue)))
+    (is (empty? (nle/validate-project reviewed)))
+    (is (= reviewed (nle/add-caption-review-note reviewed "cue" "note-1" "mika" "duplicate" 1300)))
+    (is (= [[:invalid-caption "cue"]]
+           (nle/validate-project (assoc-in reviewed [:project/captions 0 :caption/review-notes 0 :review/text] ""))))
+    (is (= [[:invalid-caption "cue"]]
+           (nle/validate-project (assoc-in reviewed [:project/captions 0 :caption/status-history 1 :status/at] 1000))))))
+(deftest assigned-reviewer-alone-can-approve
+  (let [base (-> (nle/project {})
+                 (nle/add-caption "cue" 0 60 "Ship" "en" nle/default-caption-style)
+                 (nle/set-caption-status "cue" :draft)
+                 (nle/set-caption-reviewer "cue" "mika"))
+        rejected (nle/set-caption-status base "cue" :approved "ken" 1000)
+        approved (nle/set-caption-status base "cue" :approved "mika" 1000)]
+    (is (= :draft (nle/caption-status (first (:project/captions rejected)))))
+    (is (= :approved (nle/caption-status (first (:project/captions approved)))))
+    (is (= "mika" (get-in approved [:project/captions 0 :caption/reviewer])))
+    (is (nil? (get-in (nle/set-caption-reviewer approved "cue" "")
+                      [:project/captions 0 :caption/reviewer])))
+    (is (empty? (nle/validate-project approved)))))
+(deftest caption-review-threads-reply-resolve-and-reopen-with-audit
+  (let [base (-> (nle/add-caption p "cue" 0 60 "Review" "en" nle/default-caption-style)
+                 (nle/start-caption-review-thread "cue" "thread-1" "mika" "Fix timing" 1000))
+        replied (nle/reply-caption-review-thread base "cue" "thread-1" "reply-1" "ken" "Fixed" 1100)
+        resolved (nle/set-caption-review-thread-resolution replied "cue" "thread-1" true "mika" 1200)
+        blocked-reply (nle/reply-caption-review-thread resolved "cue" "thread-1" "reply-2" "ken" "Late" 1250)
+        reopened (nle/set-caption-review-thread-resolution resolved "cue" "thread-1" false "lead" 1300)
+        root (first (get-in reopened [:project/captions 0 :caption/review-notes]))]
+    (is (= ["thread-1" "reply-1"]
+           (mapv :review/id (get-in replied [:project/captions 0 :caption/review-notes]))))
+    (is (= resolved blocked-reply))
+    (is (false? (:review/resolved? root)))
+    (is (= [{:resolution/resolved? true :resolution/actor "mika" :resolution/at 1200}
+            {:resolution/resolved? false :resolution/actor "lead" :resolution/at 1300}]
+           (:review/resolution-history root)))
+    (is (empty? (nle/validate-project reopened)))))
+(deftest review-mentions-and-assignments-create-auditable-unread-notifications
+  (let [base (-> (nle/add-caption p "cue" 0 60 "Review" "en" nle/default-caption-style)
+                 (nle/set-caption-reviewer "cue" "mika")
+                 (nle/start-caption-review-thread "cue" "thread-1" "editor" "Please check @lead" 1000))
+        replied (nle/reply-caption-review-thread base "cue" "thread-1" "reply-1" "ken" "Done @qa" 1100)
+        lead-note (first (nle/unread-review-notifications-for replied "lead"))
+        read (nle/mark-review-notification-read replied (:notification/id lead-note) "lead" 1200)
+        lead-index (first (keep-indexed #(when (= (:notification/id lead-note) (:notification/id %2)) %1)
+                                        (:project/review-notifications read)))]
+    (is (= ["lead" "mika"]
+           (sort (map :notification/recipient (:project/review-notifications base)))))
+    (is (= [:mention] (mapv :notification/kind (nle/review-notifications-for base "lead"))))
+    (is (= [:review-request] (mapv :notification/kind (nle/review-notifications-for base "mika"))))
+    (is (= ["editor" "qa"]
+           (sort (map :notification/recipient
+                      (drop 2 (:project/review-notifications replied))))))
+    (is (= [:thread-reply]
+           (mapv :notification/kind (nle/review-notifications-for replied "editor"))))
+    (is (empty? (nle/unread-review-notifications-for read "lead")))
+    (is (= replied (nle/mark-review-notification-read replied (:notification/id lead-note) "other" 1200)))
+    (is (empty? (:project/review-notifications (nle/remove-caption replied "cue"))))
+    (is (empty? (nle/validate-project read)))
+    (is (= [[:invalid-review-notification (:notification/id lead-note)]]
+           (nle/validate-project (assoc-in read [:project/review-notifications lead-index :notification/read-at] 999))))))
+(deftest proxy-preview-never-replaces-original-export-source
+  (let [asset {:url "blob:original" :proxy-url "blob:proxy"}]
+    (is (= :proxy-url (nle/media-url-key true false asset)))
+    (is (= :url (nle/media-url-key false false asset)))
+    (is (= :url (nle/media-url-key true true asset)))
+    (is (= :url (nle/media-url-key true false {:url "blob:original"})))
+    (is (= [640 360 800000]
+           ((juxt :profile/max-width :profile/max-height :profile/video-bps) nle/proxy-profile)))))
 (deftest validated-project-persistence
   (is (= p (nle/accept-project p)))
   (is (nil? (nle/accept-project (assoc p :project/schema "foreign/v1"))))
@@ -57,11 +473,31 @@
   (let [registered (nle/register-asset p "asset:7" "scene.webm" "def456")]
     (is (= "asset:7" (nle/asset-id-by-name registered "scene.webm")))
     (is (= "asset:7" (nle/asset-id-by-signature registered {:name "renamed.webm" :sha256 "def456"})))
+    (is (nil? (nle/asset-id-by-signature registered {:name "scene.webm" :sha256 "different"})))
     (is (= {:asset/name "scene.webm" :asset/sha256 "def456"} (get-in registered [:project/assets "asset:7"])))
     (is (= ["asset:7"] (nle/missing-asset-ids registered [])))
     (is (empty? (nle/missing-asset-ids registered ["asset:7"])))
     (is (= registered (nle/recover-project (nle/recovery-envelope registered))))
     (is (= "asset:0" (nle/next-asset-id registered)))))
+(deftest deterministic-directory-relink-search
+  (let [project (-> p (nle/register-asset "asset:7" "original.webm" "aaa")
+                    (nle/register-asset "asset:8" "legacy.mov"))
+        candidates [{:file/index 0 :file/path "root/z/renamed.webm" :file/name "renamed.webm" :file/sha256 "aaa"}
+                    {:file/index 1 :file/path "root/a/renamed.webm" :file/name "renamed.webm" :file/sha256 "aaa"}
+                    {:file/index 2 :file/path "root/legacy.mov" :file/name "legacy.mov" :file/sha256 "new"}
+                    {:file/index 3 :file/path "root/original.webm" :file/name "original.webm" :file/sha256 "wrong"}]
+        plan (nle/directory-relink-plan project candidates)]
+    (is (= [["asset:7" 1] ["asset:8" 2]]
+           (mapv (fn [match] [(:asset/id match) (get-in match [:candidate :file/index])]) (:relink/matches plan))))
+    (is (empty? (:relink/missing plan)))
+    (is (= ["root/original.webm" "root/z/renamed.webm"] (:relink/ignored-paths plan)))))
+(deftest content-addressed-media-cache-policy
+  (let [registered (-> p (nle/register-asset "asset:7" "scene.webm" "def456")
+                       (nle/register-asset "asset:8" "legacy.mov"))]
+    (is (= [{:asset/id "asset:7" :asset/name "scene.webm" :asset/sha256 "def456"}]
+           (nle/cache-requests registered)))
+    (is (nle/accept-cache-hit registered "asset:7" "def456"))
+    (is (not (nle/accept-cache-hit registered "asset:7" "tampered")))))
 (deftest bounded-project-undo-redo
   (let [p2 (assoc p :project/export-profile :master) history (nle/record-history nle/empty-history p)
         undone (nle/undo-project p2 history) redone (nle/redo-project (:project undone) (:history undone))]
@@ -78,3 +514,13 @@
                       (:history (nle/recover-workspace
                                  (nle/recovery-envelope p2 {:history/past (vec (repeat 70 p))
                                                             :history/future []})))))))))
+(deftest portable-media-package-contract
+  (let [sha (apply str (repeat 64 "a"))
+        packaged (nle/register-asset p "asset:7" "scene.webm" sha)
+        media {"asset:7" {:entry/name "media/0" :media/name "scene.webm" :media/type "video/webm" :media/sha256 sha}}
+        manifest (nle/package-manifest packaged media)]
+    (is (= {:project packaged :media media} (nle/accept-package packaged manifest #{"media/0"})))
+    (is (nil? (nle/accept-package packaged manifest #{})))
+    (is (nil? (nle/accept-package packaged (assoc-in manifest [:package/media "asset:7" :media/sha256]
+                                                      (apply str (repeat 64 "b"))) #{"media/0"})))
+    (is (= "media/7" (nle/package-entry-name 7)))))
