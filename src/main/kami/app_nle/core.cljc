@@ -30,7 +30,15 @@
    :mp4-master {:profile/name "Master H.264 MP4" :profile/container :mp4 :profile/extension "mp4"
                 :profile/mime "video/mp4;codecs=avc1.42E01E,mp4a.40.2"
                 :profile/mimes ["video/mp4;codecs=avc1.42E01E,mp4a.40.2" "video/mp4;codecs=avc1,mp4a.40.2" "video/mp4"]
-                :profile/video-bps 8000000 :profile/audio-bps 192000}})
+                :profile/video-bps 8000000 :profile/audio-bps 192000}
+   :mov-hdr {:profile/name "HDR MOV (external encoder)" :profile/container :mov :profile/extension "mov"
+             :profile/encoder :external :profile/video-codec :prores-422-hq :profile/audio-codec :pcm
+             :profile/requires #{:mov :prores :pcm :hdr10}}
+   :mxf-op1a {:profile/name "MXF OP1a (external encoder)" :profile/container :mxf :profile/extension "mxf"
+              :profile/encoder :external :profile/video-codec :xdcam-hd422 :profile/audio-codec :pcm
+              :profile/requires #{:mxf-op1a :xdcam-hd422 :pcm}}
+   :imf-app2e {:profile/name "IMF App 2E package" :profile/container :imf :profile/extension "zip"
+               :profile/encoder :package :profile/requires #{:imf-app2e :jpeg2000 :pcm}}})
 (defn export-filename [profile] (str "kami-nle-master." (:profile/extension profile)))
 (def proxy-profile {:profile/name "Preview proxy" :profile/mime "video/webm;codecs=vp8,opus"
                     :profile/max-width 640 :profile/max-height 360
@@ -40,8 +48,37 @@
 (def flat-eq {:low-db 0.0 :mid-db 0.0 :high-db 0.0})
 (def default-delivery-audio {:delivery/normalize? true :delivery/target-lufs -14.0
                              :delivery/sample-peak-ceiling-db -1.0})
-(def default-color-pipeline {:color/input-space :media-native :color/output-space :srgb
-                             :color/exposure-stops 0.0 :color/contrast 1.0 :color/saturation 1.0})
+(def default-color-pipeline {:color/config :builtin :color/input-space :media-native :color/output-space :srgb
+                             :color/transfer :srgb :color/primaries :rec709 :color/matrix :rgb
+                             :color/range :full :color/exposure-stops 0.0 :color/contrast 1.0 :color/saturation 1.0})
+(def hdr-transfers #{:pq :hlg})
+(def color-transfers #{:srgb :bt1886 :pq :hlg})
+(def color-primaries #{:rec709 :display-p3 :rec2020})
+(declare export-profile)
+(defn hdr-pipeline? [color] (contains? hdr-transfers (:color/transfer color)))
+(defn valid-mastering-display? [m]
+  (and (map? m) (number? (:mastering/min-luminance-nits m))
+       (number? (:mastering/max-luminance-nits m))
+       (<= 0 (:mastering/min-luminance-nits m) (:mastering/max-luminance-nits m) 10000)
+       (number? (:mastering/max-cll-nits m)) (number? (:mastering/max-fall-nits m))
+       (<= 0 (:mastering/max-fall-nits m) (:mastering/max-cll-nits m) 10000)))
+(defn export-capability-report [p available]
+  (let [profile (export-profile p) required (:profile/requires profile #{})
+        missing (->> required (remove (set available)) sort vec)]
+    {:export/profile (:project/export-profile p) :export/required required
+     :export/missing missing :export/ready? (empty? missing)}))
+(defn imf-package-errors [{:keys [package/id package/edit-rate package/assets package/composition]}]
+  (let [ids (map :asset/id assets) track-ids (map :track/asset-id (:composition/tracks composition))]
+    (vec (concat
+          (when-not (and (string? id) (not (str/blank? id))) [[:invalid-package-id]])
+          (when-not (and (vector? edit-rate) (= 2 (count edit-rate)) (every? pos-int? edit-rate)) [[:invalid-edit-rate]])
+          (when-not (= (count ids) (count (set ids))) [[:duplicate-asset-id]])
+          (for [asset assets :when (or (not (string? (:asset/id asset)))
+                                       (not (contains? #{:picture :audio :subtitle} (:asset/type asset)))
+                                       (not (re-matches #"[0-9a-f]{64}" (or (:asset/sha256 asset) ""))))]
+            [:invalid-asset (:asset/id asset)])
+          (for [asset-id track-ids :when (not (contains? (set ids) asset-id))]
+            [:missing-track-asset asset-id])))))
 (def default-caption-style {:caption/position :bottom :caption/align :center :caption/font-scale 1.0})
 (defn clamp-db [db] (max -12.0 (min 12.0 (or db 0.0))))
 (defn normalize-eq [eq]
@@ -83,9 +120,15 @@
 (defn set-color-pipeline [p key value]
   (let [p (assoc p :project/color-pipeline (color-pipeline p))]
     (case key
-      :color/input-space (if (= :media-native value) (assoc-in p [:project/color-pipeline key] value) p)
-      :color/output-space (if (contains? #{:srgb :display-p3} value)
+      :color/config (if (contains? #{:builtin :ocio} value) (assoc-in p [:project/color-pipeline key] value) p)
+      :color/input-space (if (or (= :media-native value) (string? value)) (assoc-in p [:project/color-pipeline key] value) p)
+      :color/output-space (if (contains? #{:srgb :display-p3 :rec2020} value)
                             (assoc-in p [:project/color-pipeline key] value) p)
+      :color/transfer (if (contains? color-transfers value) (assoc-in p [:project/color-pipeline key] value) p)
+      :color/primaries (if (contains? color-primaries value) (assoc-in p [:project/color-pipeline key] value) p)
+      :color/matrix (if (contains? #{:rgb :bt709 :bt2020-ncl} value) (assoc-in p [:project/color-pipeline key] value) p)
+      :color/range (if (contains? #{:full :limited} value) (assoc-in p [:project/color-pipeline key] value) p)
+      :color/mastering-display (assoc-in p [:project/color-pipeline key] value)
       :color/exposure-stops (assoc-in p [:project/color-pipeline key] (clamp -5.0 5.0 value))
       :color/contrast (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
       :color/saturation (assoc-in p [:project/color-pipeline key] (clamp 0.0 3.0 value))
@@ -807,8 +850,14 @@
                    (<= -12 (:delivery/sample-peak-ceiling-db delivery) 0))
       [:invalid-delivery-audio]))
   (when-let [color (:project/color-pipeline p)]
-    (when-not (and (= :media-native (:color/input-space color))
-                   (contains? #{:srgb :display-p3} (:color/output-space color))
+    (when-not (and (contains? #{:builtin :ocio} (:color/config color))
+                   (or (= :media-native (:color/input-space color)) (string? (:color/input-space color)))
+                   (contains? #{:srgb :display-p3 :rec2020} (:color/output-space color))
+                   (contains? color-transfers (:color/transfer color))
+                   (contains? color-primaries (:color/primaries color))
+                   (contains? #{:rgb :bt709 :bt2020-ncl} (:color/matrix color))
+                   (contains? #{:full :limited} (:color/range color))
+                   (or (not (hdr-pipeline? color)) (valid-mastering-display? (:color/mastering-display color)))
                    (<= -5 (:color/exposure-stops color) 5)
                    (<= 0 (:color/contrast color) 3)
                    (<= 0 (:color/saturation color) 3))
