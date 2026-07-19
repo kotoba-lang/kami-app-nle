@@ -1,6 +1,7 @@
 (ns kami.app-nle.ui
   (:require [reagent.core :as r] [reagent.dom.client :as rdom] [cljs.reader :as reader] [clojure.string :as str]
             [kami.app-nle.core :as nle]
+            [html.core :as html]
             [kami.app-nle.asset-sources :as asset-sources]
             [kami.app-nle.cache :as cache]
             ["fflate" :refer [zipSync unzipSync strToU8 strFromU8]]))
@@ -9,6 +10,9 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
+(def kotoba-html-contract
+  (html/html [:meta {:name "kotoba:app-shell" :content "kami-nle single-screen liquid-glass"}]
+             [:noscript "KAMI NLE requires JavaScript for media decode and rendering."]))
 (defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :caption-text "" :caption-duration-frames 60 :caption-language "en" :caption-position :bottom :caption-align :center :caption-font-scale 1.0 :review-author "editor" :caption-review-drafts {} :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96 :network-sources [] :network-source-status "Not loaded"}))
 (declare load-media!)
 (defn load-network-sources! []
@@ -1467,6 +1471,7 @@
   [:footer (if-let [e (seq (nle/validate-project project))] (str "Errors: " e) "HTMLVideo decode • graded canvas • capability-negotiated MediaRecorder export")]]))
 (defonce root-node (atom nil))
 (defn init! []
+  (.insertAdjacentHTML (.-head js/document) "beforeend" kotoba-html-contract)
   (when-not @root-node
     (restore-recovery!) (install-history!) (install-autosave!) (install-shortcuts!)
     (reset! root-node (rdom/create-root (.getElementById js/document "app"))))
