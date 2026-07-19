@@ -1139,7 +1139,7 @@
                     delivery (nle/delivery-audio project)
                     color (nle/color-pipeline project)
                     missing (nle/missing-asset-ids project (keys assets))]
- [:main [:header [:div [:small "KOTOBA-LANG / VIDEO"] [:h1 "KAMI NLE"]] [:div.transport [:button.primary {:on-click toggle-play! :disabled (not decoded?)} (if playing? "❚❚ Pause" "▶ Play decoded media")] [:output (nle/timecode frame fps)]]]
+ [:main [:header.liquid-glass__toolbar [:div [:small "KOTOBA-LANG / VIDEO"] [:h1 "KAMI NLE"]] [:div.transport [:button.primary {:on-click toggle-play! :disabled (not decoded?)} (if playing? "❚❚ Pause" "▶ Play decoded media")] [:output (nle/timecode frame fps)]]]
   [:section.meta [:button {:aria-label "Load network asset sources" :on-click load-network-sources!} "Load network assets"]
    [:output {:aria-label "Network asset source status"} (:network-source-status @state)]
    (for [source (:network-sources @state) item (take 4 (:source/items source))]
