@@ -116,12 +116,39 @@
                        (nle/set-color-pipeline :color/exposure-stops 8)
                        (nle/set-color-pipeline :color/contrast -1)
                        (nle/set-color-pipeline :color/saturation 2.25))]
-    (is (= {:color/input-space :media-native :color/output-space :display-p3
+    (is (= {:color/config :builtin :color/input-space :media-native :color/output-space :display-p3
+            :color/transfer :srgb :color/primaries :rec709 :color/matrix :rgb :color/range :full
             :color/exposure-stops 5.0 :color/contrast 0.0 :color/saturation 2.25}
            (:project/color-pipeline configured)))
     (is (empty? (nle/validate-project configured)))
     (is (= [:invalid-color-pipeline]
-           (nle/validate-project (assoc-in configured [:project/color-pipeline :color/output-space] :rec2020))))))
+           (nle/validate-project (assoc-in configured [:project/color-pipeline :color/output-space] :unknown))))))
+(deftest hdr-and-ocio-authority
+  (let [mastering {:mastering/min-luminance-nits 0.005 :mastering/max-luminance-nits 1000
+                   :mastering/max-cll-nits 1000 :mastering/max-fall-nits 400}
+        hdr (-> p (nle/set-color-pipeline :color/config :ocio)
+                (nle/set-color-pipeline :color/input-space "ACEScg")
+                (nle/set-color-pipeline :color/output-space :rec2020)
+                (nle/set-color-pipeline :color/transfer :pq)
+                (nle/set-color-pipeline :color/primaries :rec2020)
+                (nle/set-color-pipeline :color/matrix :bt2020-ncl)
+                (nle/set-color-pipeline :color/range :limited)
+                (nle/set-color-pipeline :color/mastering-display mastering))]
+    (is (nle/hdr-pipeline? (:project/color-pipeline hdr)))
+    (is (empty? (nle/validate-project hdr)))
+    (is (= [:invalid-color-pipeline]
+           (nle/validate-project (update-in hdr [:project/color-pipeline] dissoc :color/mastering-display))))))
+(deftest external-container-capability-and-imf-validation
+  (let [mov (assoc p :project/export-profile :mov-hdr)
+        report (nle/export-capability-report mov #{:mov :pcm})
+        package #:package{:id "urn:uuid:test" :edit-rate [24 1]
+                          :assets [{:asset/id "pic" :asset/type :picture :asset/sha256 (apply str (repeat 64 "a"))}]
+                          :composition {:composition/tracks [{:track/asset-id "pic"}]}}]
+    (is (= [:hdr10 :prores] (:export/missing report)))
+    (is (false? (:export/ready? report)))
+    (is (empty? (nle/imf-package-errors package)))
+    (is (= [[:missing-track-asset "missing"]]
+           (nle/imf-package-errors (assoc-in package [:package/composition :composition/tracks 0 :track/asset-id] "missing"))))))
 (deftest project-authoritative-captions-and-webvtt
   (let [captioned (-> p
                       (nle/add-caption "cap-1" 15 75 "Hello, 海辺")

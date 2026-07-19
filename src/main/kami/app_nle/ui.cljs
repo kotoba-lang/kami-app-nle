@@ -1145,7 +1145,17 @@
     [:label "Output color" [:select {:value (name (:color/output-space color)) :aria-label "Output color space"
                                        :on-change #(swap! state update :project nle/set-color-pipeline :color/output-space
                                                           (keyword (.. % -target -value)))}
-                              [:option {:value "srgb"} "sRGB"] [:option {:value "display-p3"} "Display P3"]]]
+                              [:option {:value "srgb"} "sRGB"] [:option {:value "display-p3"} "Display P3"]
+                              [:option {:value "rec2020"} "Rec.2020"]]]
+    [:label "Color authority" [:select {:value (name (:color/config color)) :aria-label "Color configuration authority"
+                                         :on-change #(swap! state update :project nle/set-color-pipeline :color/config
+                                                            (keyword (.. % -target -value)))}
+                                [:option {:value "builtin"} "Built-in"] [:option {:value "ocio"} "OCIO config"]]]
+    [:label "Transfer" [:select {:value (name (:color/transfer color)) :aria-label "Output transfer function"
+                                  :on-change #(swap! state update :project nle/set-color-pipeline :color/transfer
+                                                     (keyword (.. % -target -value)))}
+                         [:option {:value "srgb"} "sRGB"] [:option {:value "bt1886"} "BT.1886"]
+                         [:option {:value "pq"} "PQ / HDR10"] [:option {:value "hlg"} "HLG"]]]
     (for [[key label minimum maximum step]
           [[:color/exposure-stops "Exposure stops" -5 5 0.1]
            [:color/contrast "Color contrast" 0 3 0.05]
@@ -1377,6 +1387,10 @@
                               (for [[id profile] nle/export-profiles]
                                 ^{:key id} [:option {:value (name id) :disabled (not (profile-supported? profile))}
                                             (str (:profile/name profile) (when-not (profile-supported? profile) " • unsupported"))])]]
+    (let [report (nle/export-capability-report project #{})]
+      (when (seq (:export/required report))
+        [:output {:aria-label "Professional export capability status"}
+         (str "External production service required: " (str/join ", " (map name (:export/missing report))))]))
     [:label "Normalize delivery" [:input {:type "checkbox"
                                             :checked (:delivery/normalize? delivery)
                                             :aria-label "Normalize delivery audio"

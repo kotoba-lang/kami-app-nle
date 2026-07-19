@@ -1,5 +1,7 @@
 # KAMI NLE
 
+OCIO/HDR authority now records config ownership, named input space, output primaries, transfer, matrix, range and mastering-display metadata. PQ/HLG projects are rejected unless bounded mastering luminance, MaxCLL and MaxFALL metadata are complete. MOV, MXF OP1a and IMF App 2E profiles declare exact external encoder capabilities; unavailable codecs are shown as unavailable and never substituted. IMF package validation checks edit rate, asset identity, SHA-256 integrity declarations and composition references. Browser preview remains SDR canvas simulation—not a reference HDR monitor or certified encoder.
+
 Spline intervals include an accessible SVG curve canvas with the authored cubic Bézier path and both control handles. Pointer edits select the nearest handle, map canvas coordinates into bounded timing/value coordinates, preserve `x1 <= x2`, and commit through the same validated project operation as numeric controls.
 
 Caption cards expose project-authoritative interval editing for linear, discrete, and spline animation. Spline intervals provide four bounded Bézier controls with linked `x1 <= x2` UI constraints; every edit is revalidated before persistence and immediately drives preview and production evaluation.
