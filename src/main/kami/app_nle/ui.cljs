@@ -1,6 +1,7 @@
 (ns kami.app-nle.ui
   (:require [reagent.core :as r] [reagent.dom.client :as rdom] [cljs.reader :as reader] [clojure.string :as str]
             [kami.app-nle.core :as nle]
+            [kami.app-nle.asset-sources :as asset-sources]
             [kami.app-nle.cache :as cache]
             ["fflate" :refer [zipSync unzipSync strToU8 strFromU8]]))
 
@@ -8,7 +9,22 @@
  :project/tracks [{:track/id "v2" :track/name "V2 • Titles" :track/type :video :track/clips [{:clip/id "title" :clip/name "OPENING" :clip/start-frame 45 :clip/in-frame 0 :clip/out-frame 75 :clip/color "#fbbf24"}]}
  {:track/id "v1" :track/name "V1 • Picture" :track/type :video :track/clips [{:clip/id "wide" :clip/name "Wide shot" :clip/source-id "asset:0" :clip/start-frame 0 :clip/in-frame 20 :clip/out-frame 170 :clip/color "#38bdf8"} {:clip/id "close" :clip/name "Close up" :clip/source-id "asset:1" :clip/start-frame 150 :clip/in-frame 10 :clip/out-frame 130 :clip/color "#a78bfa"}]}
  {:track/id "a1" :track/name "A1 • Dialogue" :track/type :audio :track/clips [{:clip/id "dialogue" :clip/name "Dialogue.wav" :clip/start-frame 30 :clip/in-frame 0 :clip/out-frame 240 :clip/color "#34d399"}]}]}))
-(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :caption-text "" :caption-duration-frames 60 :caption-language "en" :caption-position :bottom :caption-align :center :caption-font-scale 1.0 :review-author "editor" :caption-review-drafts {} :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96}))
+(defonce state (r/atom {:project sample :history nle/empty-history :history-replaying? false :trim-drag nil :trim-preview nil :frame 105 :playing? false :selected "wide" :assets {} :audio-buffers {} :cache-restoring? false :cache-restored-count 0 :directory-searching? false :directory-result nil :proxy-preview? true :proxy-generating nil :proxy-error nil :active-source nil :pending-source-frame 0 :decoded? false :effect :none :exporting? false :analyzing-delivery? false :delivery-report nil :caption-text "" :caption-duration-frames 60 :caption-language "en" :caption-position :bottom :caption-align :center :caption-font-scale 1.0 :review-author "editor" :caption-review-drafts {} :project-error nil :recovered? false :primary-slot :a :audio-meter-db -96 :network-sources [] :network-source-status "Not loaded"}))
+(declare load-media!)
+(defn load-network-sources! []
+  (swap! state assoc :network-source-status "Loading network-isekai and kotobase.net…")
+  (-> (asset-sources/load-all!)
+      (.then (fn [sources] (swap! state assoc :network-sources (vec (array-seq sources))
+                                   :network-source-status (str "Connected: " (count (array-seq sources)) " sources"))))
+      (.catch #(swap! state assoc :network-source-status (str "Partial/offline: " (.-message %))))))
+(defn import-remote-video! [item]
+  (let [uri (:asset/uri item)]
+    (-> (js/fetch uri)
+        (.then (fn [r] (if (.-ok r) (.blob r) (throw (js/Error. (str "asset HTTP " (.-status r)))))))
+        (.then (fn [blob]
+                 (let [file (js/File. #js [blob] (or (:asset/name item) "network-asset" ) #js {:type (or (:asset/mime item) (.-type blob) "video/webm")})]
+                   (load-media! #js {:target #js {:files #js [file]}}))))
+        (.catch #(swap! state assoc :project-error (str "Remote asset import failed: " (.-message %)))))))
 (defonce video-a-node (atom nil)) (defonce video-b-node (atom nil))
 (defonce canvas-node (atom nil)) (defonce media-url (atom nil))
 (defonce export-audio (atom nil))
@@ -1124,6 +1140,12 @@
                     color (nle/color-pipeline project)
                     missing (nle/missing-asset-ids project (keys assets))]
  [:main [:header [:div [:small "KOTOBA-LANG / VIDEO"] [:h1 "KAMI NLE"]] [:div.transport [:button.primary {:on-click toggle-play! :disabled (not decoded?)} (if playing? "❚❚ Pause" "▶ Play decoded media")] [:output (nle/timecode frame fps)]]]
+  [:section.meta [:button {:aria-label "Load network asset sources" :on-click load-network-sources!} "Load network assets"]
+   [:output {:aria-label "Network asset source status"} (:network-source-status @state)]
+   (for [source (:network-sources @state) item (take 4 (:source/items source))]
+     ^{:key (str (:source/id source) (:asset/id item))}
+     [:button {:aria-label (str "Import remote asset " (:asset/name item)) :on-click #(import-remote-video! item)}
+      (str "Import " (:asset/name item))])]
   [:section.workspace [:aside [:h2 "Project bin"] [:label.import "Import / relink V1 videos" [:input {:type "file" :accept "video/*" :multiple true :aria-label "Import or relink NLE videos" :on-change load-media!}]]
     [:label.import "Import independent audio lanes" [:input {:type "file" :accept "audio/*" :multiple true
                                                                :aria-label "Import NLE audio lanes" :on-change load-audio!}]]
